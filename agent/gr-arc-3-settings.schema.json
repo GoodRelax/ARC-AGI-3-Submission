@@ -1,0 +1,14 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "GR-ARC-3 agent settings",
+  "description": "Runtime configuration for the GR-ARC-3 agent. Loaded once at the boundary (agent/settings.py) and passed as a value into the pure core; agent/core does no file I/O (NFR-6 / DP-10). Reading this schema is enough to understand every key. Every key toggles a configurable GUARDRAIL; the core solving loop (explore -> model -> goal -> plan -> act) must solve WITHOUT any guardrail, so a guardrail only adds efficiency / survival and may be switched off to prove the core.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "futility_check": {
+      "description": "Wasted-move (futility) guardrail. 'enabled' (default): plan-stage pruning of predicted-futile candidate moves (CheckFutility) + a WorkingMemory visited/dead set that forbids re-entering a visited CONCRETE state (so loops of ANY period are pruned) + futile-run escalation to exploration. 'disabled': the whole guardrail is off and the agent must STILL solve via the core loop -- a deliberate test that solving does not depend on the guardrail.",
+      "enum": ["enabled", "disabled"],
+      "default": "enabled"
+    }
+  }
+}

@@ -1,0 +1,29 @@
+# Secrets (NEVER commit)
+.env
+**/.env
+*.key
+# Kaggle API token (project-local, read by the Makefile)
+.kaggle/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Kaggle starter: vendored framework, downloaded games, recordings, generated notebook
+vendor/
+environment_files/
+recordings/
+logs.log
+notebooks/submission.ipynb
+reference/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
