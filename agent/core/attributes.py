@@ -21,10 +21,16 @@ From step 6-3.5 (pose geometry / orientation representation):
     MEASURED here by :func:`compute_pose_geometry` (the single pose-measurement
     point) but live on the GameObject (object-schema §3 / TERM-43..46), NOT in the
     Profile — the Word stays 1-D.
+From step 6-3.7 (goal-marker wiring):
+  * ``feat_afford`` sub-modifier ``mark`` is now LIVE — it emits the ``marked`` Word
+    iff :attr:`FeatureContext.marked` is set. ``marked`` is a BOARD-CONTEXT signal
+    (a rare-colour, non-field object), so the caller that holds the whole-frame
+    colour census sets it (mirrors ``is_field``); the detector only relays it. This
+    fires the ``has(marked)`` arm of the roles.tsv ``target`` recognizer.
 Deferred to later sub-steps:
-  * ``feat_afford`` sub-modifiers ``controllable`` / ``mark`` / ``pose_mutable`` /
+  * ``feat_afford`` sub-modifiers ``controllable`` / ``pose_mutable`` /
     ``interactive`` / ``interactive_target`` — their evidence (grounded pick /
-    salience / pose-carry / EffectSignature) is not wired yet; they report absent.
+    pose-carry / EffectSignature) is not wired yet; they report absent.
   * ``feat_scale`` / ``feat_orient`` — STAY deferred (NOT registered): they need the
     integer-magnitude representation settled (scale(O) is an integer factor, not a
     [0,1] magnitude — flagged); they name axes whose VALUES live on the GameObject.
@@ -71,6 +77,15 @@ class FeatureContext:
     affordance: Optional[Affordance] = None
     is_field: bool = False
     reflected: bool = False
+    marked: bool = False
+    """Whether this (non-field) object is a goal-marker per the BOARD-CONTEXT
+    rare-colour rule (a salient/goal-marker signal). Set by the caller that holds
+    the whole-frame colour census (search_agent), never by a detector reading only
+    this object's own cells -- ``marked`` needs per-colour totals over the WHOLE
+    board, not this object's footprint. Mirrors :attr:`is_field` (a per-object flag
+    the caller computes once and relays). ``feat_afford(mark)`` emits the ``marked``
+    Word iff this is set, so the ``has(marked)`` arm of the roles.tsv ``target``
+    recognizer fires. Default ``False`` -> byte-identical to the unwired baseline."""
 
 
 # --------------------------------------------------------------------------- #
@@ -358,11 +373,34 @@ def _detect_afford(ctx: FeatureContext, params: Mapping[str, str]) -> Detection:
         if ctx.is_field:
             return (1.0, 1.0)
         return None
+    if affordance == "mark":
+        # Goal-marker salience (verbalization §4 `mark`). NOT derived from the
+        # world_model affordance evidence: ``marked`` is a BOARD-CONTEXT signal
+        # (a rare-colour, non-field object) that the caller computes once over the
+        # whole frame and relays via ``ctx.marked`` (mirrors ``ctx.is_field``).
+        # Present (1.0, 1.0) iff that flag is set; this is the ``has(marked)`` arm
+        # of the roles.tsv `target` recognizer.
+        if ctx.marked:
+            return (1.0, 1.0)
+        return None
     if affordance == "static":
         # §4: no dynamics evidence => static is detectable (roles.tsv `field`
         # reads has(static)); naming omits it but detection emits it. Present iff
         # there is no affordance evidence at all: None, OR all four supports == 0
         # and not autonomous.
+        #
+        # MARKED SUPPRESSES STATIC: a `marked` object is a FOREGROUND goal-marker,
+        # not background. Because the `field` recognizer or(has(is_field),
+        # has(static)) runs in the non-relational wave (BEFORE the relational
+        # `target`), a marked-but-motionless goal object would otherwise be claimed
+        # as `field` and never reach `target`. Withholding `static` when ctx.marked
+        # keeps the field-precedence invariant intact for genuine background (which
+        # is never marked) while letting the marked goal flow to `target`. This is
+        # the single-frame unblock; multi-frame `static` refinement stays deferred.
+        # OFF byte-identity: ctx.marked is False when ARC_MARKED is off, so this
+        # branch is unchanged from the baseline.
+        if ctx.marked:
+            return None
         if af is None or (
             af.translate_support == 0
             and af.vanish_support == 0
@@ -376,8 +414,9 @@ def _detect_afford(ctx: FeatureContext, params: Mapping[str, str]) -> Detection:
     # DEFERRED (evidence source not wired yet, lands in a later step):
     #   controllable      -> FR-168 grounded controllable (grounded pick, not in
     #                        the affordance evidence);
-    #   mark / pose_mutable -> salience / pose-carry signal;
-    #   interactive / interactive_target -> EffectSignature (function naming §5).
+    #   pose_mutable      -> pose-carry signal;
+    #   interactive / interactive_target -> EffectSignature (function naming §5);
+    #   clickable / gauge / blocking / lethal -> their evidence is not wired.
     # These must not crash; they simply report absent for now.
     return None
 

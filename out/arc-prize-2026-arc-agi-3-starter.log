@@ -1,0 +1,148 @@
+[{"stream_name":"stderr","time":6.840842363,"data":"0.00s - Debugger warning: It seems that frozen modules are being used, which may\n"}
+,{"stream_name":"stderr","time":6.840903822,"data":"0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off\n"}
+,{"stream_name":"stderr","time":6.840914877,"data":"0.00s - to python to disable frozen modules.\n"}
+,{"stream_name":"stderr","time":6.840917932,"data":"0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.\n"}
+,{"stream_name":"stderr","time":7.433098939,"data":"0.00s - Debugger warning: It seems that frozen modules are being used, which may\n"}
+,{"stream_name":"stderr","time":7.4331390299999995,"data":"0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off\n"}
+,{"stream_name":"stderr","time":7.433142929,"data":"0.00s - to python to disable frozen modules.\n"}
+,{"stream_name":"stderr","time":7.433145799,"data":"0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.\n"}
+,{"stream_name":"stdout","time":10.377248386,"data":"Looking in links: /kaggle/input/competitions/arc-prize-2026-arc-agi-3/arc_agi_3_wheels\r\n"}
+,{"stream_name":"stdout","time":10.377308793,"data":"Processing /kaggle/input/competitions/arc-prize-2026-arc-agi-3/arc_agi_3_wheels/arc_agi-0.9.8-py3-none-any.whl\r\n"}
+,{"stream_name":"stdout","time":10.427720132,"data":"Requirement already satisfied: python-dotenv in /usr/local/lib/python3.12/dist-packages (1.2.2)\r\n"}
+,{"stream_name":"stdout","time":10.427742844,"data":"Processing /kaggle/input/competitions/arc-prize-2026-arc-agi-3/arc_agi_3_wheels/arcengine-0.9.3-py3-none-any.whl (from arc-agi)\r\n"}
+,{"stream_name":"stdout","time":10.427747379,"data":"Requirement already satisfied: flask\u003e=3.1.0 in /usr/local/lib/python3.12/dist-packages (from arc-agi) (3.1.3)\r\n"}
+,{"stream_name":"stdout","time":10.427751517,"data":"Requirement already satisfied: matplotlib\u003e=3.7.0 in /usr/local/lib/python3.12/dist-packages (from arc-agi) (3.10.0)\r\n"}
+,{"stream_name":"stdout","time":10.427755334,"data":"Requirement already satisfied: pydantic\u003e=2.0.0 in /usr/local/lib/python3.12/dist-packages (from arc-agi) (2.12.3)\r\n"}
+,{"stream_name":"stdout","time":10.427759178,"data":"Processing /kaggle/input/competitions/arc-prize-2026-arc-agi-3/arc_agi_3_wheels/pillow-12.2.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (from arc-agi)\r\n"}
+,{"stream_name":"stdout","time":10.579591928,"data":"Requirement already satisfied: requests\u003e=2.31.0 in /usr/local/lib/python3.12/dist-packages (from arc-agi) (2.32.4)\r\n"}
+,{"stream_name":"stdout","time":10.579613769,"data":"Requirement already satisfied: numpy\u003e=1.24.0 in /usr/local/lib/python3.12/dist-packages (from arcengine\u003e=0.9.3-\u003earc-agi) (2.4.6)\r\n"}
+,{"stream_name":"stdout","time":10.579619128000001,"data":"Requirement already satisfied: blinker\u003e=1.9.0 in /usr/local/lib/python3.12/dist-packages (from flask\u003e=3.1.0-\u003earc-agi) (1.9.0)\r\n"}
+,{"stream_name":"stdout","time":10.579623664,"data":"Requirement already satisfied: click\u003e=8.1.3 in /usr/local/lib/python3.12/dist-packages (from flask\u003e=3.1.0-\u003earc-agi) (8.3.2)\r\n"}
+,{"stream_name":"stdout","time":10.579627907999999,"data":"Requirement already satisfied: itsdangerous\u003e=2.2.0 in /usr/local/lib/python3.12/dist-packages (from flask\u003e=3.1.0-\u003earc-agi) (2.2.0)\r\n"}
+,{"stream_name":"stdout","time":10.579632316,"data":"Requirement already satisfied: jinja2\u003e=3.1.2 in /usr/local/lib/python3.12/dist-packages (from flask\u003e=3.1.0-\u003earc-agi) (3.1.6)\r\n"}
+,{"stream_name":"stdout","time":10.579636926,"data":"Requirement already satisfied: markupsafe\u003e=2.1.1 in /usr/local/lib/python3.12/dist-packages (from flask\u003e=3.1.0-\u003earc-agi) (3.0.3)\r\n"}
+,{"stream_name":"stdout","time":10.579655746,"data":"Requirement already satisfied: werkzeug\u003e=3.1.0 in /usr/local/lib/python3.12/dist-packages (from flask\u003e=3.1.0-\u003earc-agi) (3.1.8)\r\n"}
+,{"stream_name":"stdout","time":10.579660985,"data":"Requirement already satisfied: contourpy\u003e=1.0.1 in /usr/local/lib/python3.12/dist-packages (from matplotlib\u003e=3.7.0-\u003earc-agi) (1.3.3)\r\n"}
+,{"stream_name":"stdout","time":10.579665391,"data":"Requirement already satisfied: cycler\u003e=0.10 in /usr/local/lib/python3.12/dist-packages (from matplotlib\u003e=3.7.0-\u003earc-agi) (0.12.1)\r\n"}
+,{"stream_name":"stdout","time":10.579669384,"data":"Requirement already satisfied: fonttools\u003e=4.22.0 in /usr/local/lib/python3.12/dist-packages (from matplotlib\u003e=3.7.0-\u003earc-agi) (4.62.1)\r\n"}
+,{"stream_name":"stdout","time":10.630746096,"data":"Requirement already satisfied: kiwisolver\u003e=1.3.1 in /usr/local/lib/python3.12/dist-packages (from matplotlib\u003e=3.7.0-\u003earc-agi) (1.5.0)\r\n"}
+,{"stream_name":"stdout","time":10.630772285,"data":"Requirement already satisfied: packaging\u003e=20.0 in /usr/local/lib/python3.12/dist-packages (from matplotlib\u003e=3.7.0-\u003earc-agi) (26.2)\r\n"}
+,{"stream_name":"stdout","time":10.630776089,"data":"Requirement already satisfied: pyparsing\u003e=2.3.1 in /usr/local/lib/python3.12/dist-packages (from matplotlib\u003e=3.7.0-\u003earc-agi) (3.3.2)\r\n"}
+,{"stream_name":"stdout","time":10.630778999,"data":"Requirement already satisfied: python-dateutil\u003e=2.7 in /usr/local/lib/python3.12/dist-packages (from matplotlib\u003e=3.7.0-\u003earc-agi) (2.9.0.post0)\r\n"}
+,{"stream_name":"stdout","time":10.630782347,"data":"Requirement already satisfied: annotated-types\u003e=0.6.0 in /usr/local/lib/python3.12/dist-packages (from pydantic\u003e=2.0.0-\u003earc-agi) (0.7.0)\r\n"}
+,{"stream_name":"stdout","time":10.630785102,"data":"Requirement already satisfied: pydantic-core==2.41.4 in /usr/local/lib/python3.12/dist-packages (from pydantic\u003e=2.0.0-\u003earc-agi) (2.41.4)\r\n"}
+,{"stream_name":"stdout","time":10.630800615,"data":"Requirement already satisfied: typing-extensions\u003e=4.14.1 in /usr/local/lib/python3.12/dist-packages (from pydantic\u003e=2.0.0-\u003earc-agi) (4.15.0)\r\n"}
+,{"stream_name":"stdout","time":10.630805499000001,"data":"Requirement already satisfied: typing-inspection\u003e=0.4.2 in /usr/local/lib/python3.12/dist-packages (from pydantic\u003e=2.0.0-\u003earc-agi) (0.4.2)\r\n"}
+,{"stream_name":"stdout","time":10.630810036,"data":"Requirement already satisfied: charset_normalizer\u003c4,\u003e=2 in /usr/local/lib/python3.12/dist-packages (from requests\u003e=2.31.0-\u003earc-agi) (3.4.7)\r\n"}
+,{"stream_name":"stdout","time":10.63081478,"data":"Requirement already satisfied: idna\u003c4,\u003e=2.5 in /usr/local/lib/python3.12/dist-packages (from requests\u003e=2.31.0-\u003earc-agi) (3.11)\r\n"}
+,{"stream_name":"stdout","time":10.630819362,"data":"Requirement already satisfied: urllib3\u003c3,\u003e=1.21.1 in /usr/local/lib/python3.12/dist-packages (from requests\u003e=2.31.0-\u003earc-agi) (2.5.0)\r\n"}
+,{"stream_name":"stdout","time":10.630823792,"data":"Requirement already satisfied: certifi\u003e=2017.4.17 in /usr/local/lib/python3.12/dist-packages (from requests\u003e=2.31.0-\u003earc-agi) (2026.2.25)\r\n"}
+,{"stream_name":"stdout","time":10.681043611,"data":"Requirement already satisfied: six\u003e=1.5 in /usr/local/lib/python3.12/dist-packages (from python-dateutil\u003e=2.7-\u003ematplotlib\u003e=3.7.0-\u003earc-agi) (1.17.0)\r\n"}
+,{"stream_name":"stdout","time":12.707449778,"data":"Installing collected packages: pillow, arcengine, arc-agi\r\n"}
+,{"stream_name":"stdout","time":12.707482645,"data":"  Attempting uninstall: pillow\r\n"}
+,{"stream_name":"stdout","time":12.959924712,"data":"    Found existing installation: pillow 11.3.0\r\n"}
+,{"stream_name":"stdout","time":13.010721506,"data":"    Uninstalling pillow-11.3.0:\r\n"}
+,{"stream_name":"stdout","time":13.112508089,"data":"      Successfully uninstalled pillow-11.3.0\r\n"}
+,{"stream_name":"stdout","time":13.618461688,"data":"\u001b[31mERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.\r\n"}
+,{"stream_name":"stdout","time":13.618494553,"data":"ydata-profiling 4.18.4 requires numba\u003c0.63,\u003e=0.60, but you have numba 0.65.1 which is incompatible.\r\n"}
+,{"stream_name":"stdout","time":13.618499985,"data":"ydata-profiling 4.18.4 requires numpy\u003c2.4,\u003e=1.22, but you have numpy 2.4.6 which is incompatible.\r\n"}
+,{"stream_name":"stdout","time":13.618503746,"data":"dopamine-rl 4.1.2 requires gym\u003c=0.25.2, but you have gym 0.26.2 which is incompatible.\r\n"}
+,{"stream_name":"stdout","time":13.618508003,"data":"gradio 5.50.0 requires pillow\u003c12.0,\u003e=8.0, but you have pillow 12.2.0 which is incompatible.\u001b[0m\u001b[31m\r\n"}
+,{"stream_name":"stdout","time":13.618511929,"data":"\u001b[0mSuccessfully installed arc-agi-0.9.8 arcengine-0.9.3 pillow-12.2.0\r\n"}
+,{"stream_name":"stdout","time":14.333439524,"data":"[offline-deps] wheel dir: /kaggle/input/arc-agi3-llm-wheels (55 wheels)\n"}
+,{"stream_name":"stdout","time":15.199697822,"data":"Looking in links: /kaggle/input/arc-agi3-llm-wheels\n"}
+,{"stream_name":"stdout","time":15.233551651,"data":"Processing /kaggle/input/arc-agi3-llm-wheels/transformers-4.44.2-py3-none-any.whl\n"}
+,{"stream_name":"stdout","time":15.401999519,"data":"Looking in links: /kaggle/input/arc-agi3-llm-wheels\n"}
+,{"stream_name":"stdout","time":15.402035165000001,"data":"Processing /kaggle/input/arc-agi3-llm-wheels/transformers-4.44.2-py3-none-any.whl\n"}
+,{"stream_name":"stdout","time":15.420742292,"data":"Processing /kaggle/input/arc-agi3-llm-wheels/lm_format_enforcer-0.10.9-py3-none-any.whl\n"}
+,{"stream_name":"stdout","time":15.457474444,"data":"Requirement already satisfied: filelock in /usr/local/lib/python3.12/dist-packages (from transformers==4.44.2) (3.25.2)\n"}
+,{"stream_name":"stdout","time":15.465824683,"data":"Processing /kaggle/input/arc-agi3-llm-wheels/huggingface_hub-0.36.2-py3-none-any.whl (from transformers==4.44.2)\n"}
+,{"stream_name":"stdout","time":15.534617274,"data":"Requirement already satisfied: numpy\u003e=1.17 in /usr/local/lib/python3.12/dist-packages (from transformers==4.44.2) (2.4.6)\n"}
+,{"stream_name":"stdout","time":15.535672456,"data":"Requirement already satisfied: packaging\u003e=20.0 in /usr/local/lib/python3.12/dist-packages (from transformers==4.44.2) (26.2)\n"}
+,{"stream_name":"stdout","time":15.53688255,"data":"Requirement already satisfied: pyyaml\u003e=5.1 in /usr/local/lib/python3.12/dist-packages (from transformers==4.44.2) (6.0.3)\n"}
+,{"stream_name":"stdout","time":15.539200595,"data":"Requirement already satisfied: regex!=2019.12.17 in /usr/local/lib/python3.12/dist-packages (from transformers==4.44.2) (2025.11.3)\n"}
+,{"stream_name":"stdout","time":15.540287719,"data":"Requirement already satisfied: requests in /usr/local/lib/python3.12/dist-packages (from transformers==4.44.2) (2.32.4)\n"}
+,{"stream_name":"stdout","time":15.541728593,"data":"Requirement already satisfied: safetensors\u003e=0.4.1 in /usr/local/lib/python3.12/dist-packages (from transformers==4.44.2) (0.7.0)\n"}
+,{"stream_name":"stdout","time":15.550090891,"data":"Processing /kaggle/input/arc-agi3-llm-wheels/tokenizers-0.19.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (from transformers==4.44.2)\n"}
+,{"stream_name":"stdout","time":15.58617326,"data":"Requirement already satisfied: tqdm\u003e=4.27 in /usr/local/lib/python3.12/dist-packages (from transformers==4.44.2) (4.67.3)\n"}
+,{"stream_name":"stdout","time":15.594964367,"data":"Processing /kaggle/input/arc-agi3-llm-wheels/interegular-0.3.3-py37-none-any.whl (from lm-format-enforcer==0.10.9)\n"}
+,{"stream_name":"stdout","time":15.602799002,"data":"Requirement already satisfied: pydantic\u003e=1.10.8 in /usr/local/lib/python3.12/dist-packages (from lm-format-enforcer==0.10.9) (2.12.3)\n"}
+,{"stream_name":"stdout","time":15.616106113,"data":"Requirement already satisfied: fsspec\u003e=2023.5.0 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub\u003c1.0,\u003e=0.23.2-\u003etransformers==4.44.2) (2025.3.0)\n"}
+,{"stream_name":"stdout","time":15.617841632,"data":"Requirement already satisfied: hf-xet\u003c2.0.0,\u003e=1.1.3 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub\u003c1.0,\u003e=0.23.2-\u003etransformers==4.44.2) (1.4.3)\n"}
+,{"stream_name":"stdout","time":15.621622992,"data":"Requirement already satisfied: typing-extensions\u003e=3.7.4.3 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub\u003c1.0,\u003e=0.23.2-\u003etransformers==4.44.2) (4.15.0)\n"}
+,{"stream_name":"stdout","time":15.623035549,"data":"Processing /kaggle/input/arc-agi3-llm-wheels/lm_format_enforcer-0.10.9-py3-none-any.whl\n"}
+,{"stream_name":"stdout","time":15.623052994,"data":"Requirement already satisfied: filelock in /usr/local/lib/python3.12/dist-packages (from transformers==4.44.2) (3.25.2)\n"}
+,{"stream_name":"stdout","time":15.623057695,"data":"Processing /kaggle/input/arc-agi3-llm-wheels/huggingface_hub-0.36.2-py3-none-any.whl (from transformers==4.44.2)\n"}
+,{"stream_name":"stdout","time":15.623061764,"data":"Requirement already satisfied: numpy\u003e=1.17 in /usr/local/lib/python3.12/dist-packages (from transformers==4.44.2) (2.4.6)\n"}
+,{"stream_name":"stdout","time":15.623066445,"data":"Requirement already satisfied: packaging\u003e=20.0 in /usr/local/lib/python3.12/dist-packages (from transformers==4.44.2) (26.2)\n"}
+,{"stream_name":"stdout","time":15.623070774,"data":"Requirement already satisfied: pyyaml\u003e=5.1 in /usr/local/lib/python3.12/dist-packages (from transformers==4.44.2) (6.0.3)\n"}
+,{"stream_name":"stdout","time":15.623074656,"data":"Requirement already satisfied: regex!=2019.12.17 in /usr/local/lib/python3.12/dist-packages (from transformers==4.44.2) (2025.11.3)\n"}
+,{"stream_name":"stdout","time":15.623078529,"data":"Requirement already satisfied: requests in /usr/local/lib/python3.12/dist-packages (from transformers==4.44.2) (2.32.4)\n"}
+,{"stream_name":"stdout","time":15.62308232,"data":"Requirement already satisfied: safetensors\u003e=0.4.1 in /usr/local/lib/python3.12/dist-packages (from transformers==4.44.2) (0.7.0)\n"}
+,{"stream_name":"stdout","time":15.623086457,"data":"Processing /kaggle/input/arc-agi3-llm-wheels/tokenizers-0.19.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (from transformers==4.44.2)\n"}
+,{"stream_name":"stdout","time":15.623090703,"data":"Requirement already satisfied: tqdm\u003e=4.27 in /usr/local/lib/python3.12/dist-packages (from transformers==4.44.2) (4.67.3)\n"}
+,{"stream_name":"stdout","time":15.623094892,"data":"Processing /kaggle/input/arc-agi3-llm-wheels/interegular-0.3.3-py37-none-any.whl (from lm-format-enforcer==0.10.9)\n"}
+,{"stream_name":"stdout","time":15.623099032,"data":"Requirement already satisfied: pydantic\u003e=1.10.8 in /usr/local/lib/python3.12/dist-packages (from lm-format-enforcer==0.10.9) (2.12.3)\n"}
+,{"stream_name":"stdout","time":15.623103466,"data":"Requirement already satisfied: fsspec\u003e=2023.5.0 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub\u003c1.0,\u003e=0.23.2-\u003etransformers==4.44.2) (2025.3.0)\n"}
+,{"stream_name":"stdout","time":15.623121489,"data":"Requirement already satisfied: hf-xet\u003c2.0.0,\u003e=1.1.3 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub\u003c1.0,\u003e=0.23.2-\u003etransformers==4.44.2) (1.4.3)\n"}
+,{"stream_name":"stdout","time":15.627852794,"data":"Requirement already satisfied: annotated-types\u003e=0.6.0 in /usr/local/lib/python3.12/dist-packages (from pydantic\u003e=1.10.8-\u003elm-format-enforcer==0.10.9) (0.7.0)\n"}
+,{"stream_name":"stdout","time":15.629024933,"data":"Requirement already satisfied: pydantic-core==2.41.4 in /usr/local/lib/python3.12/dist-packages (from pydantic\u003e=1.10.8-\u003elm-format-enforcer==0.10.9) (2.41.4)\n"}
+,{"stream_name":"stdout","time":15.63064302,"data":"Requirement already satisfied: typing-inspection\u003e=0.4.2 in /usr/local/lib/python3.12/dist-packages (from pydantic\u003e=1.10.8-\u003elm-format-enforcer==0.10.9) (0.4.2)\n"}
+,{"stream_name":"stdout","time":15.651922909,"data":"Requirement already satisfied: charset_normalizer\u003c4,\u003e=2 in /usr/local/lib/python3.12/dist-packages (from requests-\u003etransformers==4.44.2) (3.4.7)\n"}
+,{"stream_name":"stdout","time":15.653244498,"data":"Requirement already satisfied: idna\u003c4,\u003e=2.5 in /usr/local/lib/python3.12/dist-packages (from requests-\u003etransformers==4.44.2) (3.11)\n"}
+,{"stream_name":"stdout","time":15.654630737,"data":"Requirement already satisfied: urllib3\u003c3,\u003e=1.21.1 in /usr/local/lib/python3.12/dist-packages (from requests-\u003etransformers==4.44.2) (2.5.0)\n"}
+,{"stream_name":"stdout","time":15.655709942,"data":"Requirement already satisfied: certifi\u003e=2017.4.17 in /usr/local/lib/python3.12/dist-packages (from requests-\u003etransformers==4.44.2) (2026.2.25)\n"}
+,{"stream_name":"stdout","time":15.82431347,"data":"Requirement already satisfied: typing-extensions\u003e=3.7.4.3 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub\u003c1.0,\u003e=0.23.2-\u003etransformers==4.44.2) (4.15.0)\n"}
+,{"stream_name":"stdout","time":15.824347086,"data":"Requirement already satisfied: annotated-types\u003e=0.6.0 in /usr/local/lib/python3.12/dist-packages (from pydantic\u003e=1.10.8-\u003elm-format-enforcer==0.10.9) (0.7.0)\n"}
+,{"stream_name":"stdout","time":15.824353391,"data":"Requirement already satisfied: pydantic-core==2.41.4 in /usr/local/lib/python3.12/dist-packages (from pydantic\u003e=1.10.8-\u003elm-format-enforcer==0.10.9) (2.41.4)\n"}
+,{"stream_name":"stdout","time":15.824358225,"data":"Requirement already satisfied: typing-inspection\u003e=0.4.2 in /usr/local/lib/python3.12/dist-packages (from pydantic\u003e=1.10.8-\u003elm-format-enforcer==0.10.9) (0.4.2)\n"}
+,{"stream_name":"stdout","time":15.824362846,"data":"Requirement already satisfied: charset_normalizer\u003c4,\u003e=2 in /usr/local/lib/python3.12/dist-packages (from requests-\u003etransformers==4.44.2) (3.4.7)\n"}
+,{"stream_name":"stdout","time":15.824367358,"data":"Requirement already satisfied: idna\u003c4,\u003e=2.5 in /usr/local/lib/python3.12/dist-packages (from requests-\u003etransformers==4.44.2) (3.11)\n"}
+,{"stream_name":"stdout","time":15.824372458,"data":"Requirement already satisfied: urllib3\u003c3,\u003e=1.21.1 in /usr/local/lib/python3.12/dist-packages (from requests-\u003etransformers==4.44.2) (2.5.0)\n"}
+,{"stream_name":"stdout","time":15.824377098,"data":"Requirement already satisfied: certifi\u003e=2017.4.17 in /usr/local/lib/python3.12/dist-packages (from requests-\u003etransformers==4.44.2) (2026.2.25)\n"}
+,{"stream_name":"stdout","time":17.697192212,"data":"Installing collected packages: interegular, huggingface-hub, tokenizers, lm-format-enforcer, transformers\n"}
+,{"stream_name":"stdout","time":17.730877201,"data":"  Attempting uninstall: huggingface-hub\n"}
+,{"stream_name":"stdout","time":17.868399863,"data":"    Found existing installation: huggingface_hub 1.10.1\n"}
+,{"stream_name":"stdout","time":17.888478413,"data":"    Uninstalling huggingface_hub-1.10.1:\n"}
+,{"stream_name":"stdout","time":17.899389848,"data":"Installing collected packages: interegular, huggingface-hub, tokenizers, lm-format-enforcer, transformers\n"}
+,{"stream_name":"stdout","time":17.899433303,"data":"  Attempting uninstall: huggingface-hub\n"}
+,{"stream_name":"stdout","time":17.89943894,"data":"    Found existing installation: huggingface_hub 1.10.1\n"}
+,{"stream_name":"stdout","time":17.899442795,"data":"    Uninstalling huggingface_hub-1.10.1:\n"}
+,{"stream_name":"stdout","time":18.022424692,"data":"      Successfully uninstalled huggingface_hub-1.10.1\n"}
+,{"stream_name":"stdout","time":18.22473936,"data":"      Successfully uninstalled huggingface_hub-1.10.1\n"}
+,{"stream_name":"stdout","time":18.376270002,"data":"  Attempting uninstall: tokenizers\n"}
+,{"stream_name":"stdout","time":18.578740197,"data":"  Attempting uninstall: tokenizers\n"}
+,{"stream_name":"stdout","time":18.636881013,"data":"    Found existing installation: tokenizers 0.22.2\n"}
+,{"stream_name":"stdout","time":18.64598007,"data":"    Uninstalling tokenizers-0.22.2:\n"}
+,{"stream_name":"stdout","time":18.702460171,"data":"      Successfully uninstalled tokenizers-0.22.2\n"}
+,{"stream_name":"stdout","time":18.839347176,"data":"    Found existing installation: tokenizers 0.22.2\n"}
+,{"stream_name":"stdout","time":18.839376242,"data":"    Uninstalling tokenizers-0.22.2:\n"}
+,{"stream_name":"stdout","time":18.839385216,"data":"      Successfully uninstalled tokenizers-0.22.2\n"}
+,{"stream_name":"stdout","time":18.849314374,"data":"  Attempting uninstall: transformers\n"}
+,{"stream_name":"stdout","time":19.051638811,"data":"  Attempting uninstall: transformers\n"}
+,{"stream_name":"stdout","time":19.131830036,"data":"    Found existing installation: transformers 5.0.0\n"}
+,{"stream_name":"stdout","time":19.33454833,"data":"    Found existing installation: transformers 5.0.0\n"}
+,{"stream_name":"stdout","time":19.468285059,"data":"    Uninstalling transformers-5.0.0:\n"}
+,{"stream_name":"stdout","time":19.670790067,"data":"    Uninstalling transformers-5.0.0:\n"}
+,{"stream_name":"stdout","time":20.963549609,"data":"      Successfully uninstalled transformers-5.0.0\n"}
+,{"stream_name":"stdout","time":21.1677065,"data":"      Successfully uninstalled transformers-5.0.0\n"}
+,{"stream_name":"stderr","time":27.284079405,"data":"ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.\n"}
+,{"stream_name":"stderr","time":27.284115037,"data":"gradio 5.50.0 requires pillow\u003c12.0,\u003e=8.0, but you have pillow 12.2.0 which is incompatible.\n"}
+,{"stream_name":"stdout","time":27.284446744,"data":"Successfully installed huggingface-hub-0.36.2 interegular-0.3.3 lm-format-enforcer-0.10.9 tokenizers-0.19.1 transformers-4.44.2\n"}
+,{"stream_name":"stdout","time":27.358894636,"data":"Successfully installed huggingface-hub-0.36.2 interegular-0.3.3 lm-format-enforcer-0.10.9 tokenizers-0.19.1 transformers-4.44.2\n"}
+,{"stream_name":"stdout","time":27.35894499,"data":"[offline-deps] installed transformers==4.44.2 + lm-format-enforcer==0.10.9\n"}
+,{"stream_name":"stderr","time":27.360122175,"data":"ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.\n"}
+,{"stream_name":"stderr","time":27.360147336,"data":"gradio 5.50.0 requires pillow\u003c12.0,\u003e=8.0, but you have pillow 12.2.0 which is incompatible.\n"}
+,{"stream_name":"stderr","time":27.360166962,"data":"\n"}
+,{"stream_name":"stderr","time":27.360169681,"data":"ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.\n"}
+,{"stream_name":"stderr","time":27.360172779,"data":"gradio 5.50.0 requires pillow\u003c12.0,\u003e=8.0, but you have pillow 12.2.0 which is incompatible.\n"}
+,{"stream_name":"stdout","time":27.479649574,"data":"Writing /tmp/my_agent.py\n"}
+,{"stream_name":"stderr","time":30.948414979,"data":"/usr/local/lib/python3.12/dist-packages/mistune.py:435: SyntaxWarning: invalid escape sequence '\\|'\n"}
+,{"stream_name":"stderr","time":30.948438249,"data":"  cells[i][c] = re.sub('\\\\\\\\\\|', '|', cell)\n"}
+,{"stream_name":"stderr","time":31.159167407,"data":"/usr/local/lib/python3.12/dist-packages/nbconvert/filters/filter_links.py:36: SyntaxWarning: invalid escape sequence '\\_'\n"}
+,{"stream_name":"stderr","time":31.159193217,"data":"  text = re.sub(r'_', '\\_', text) # Escape underscores in display text\n"}
+,{"stream_name":"stderr","time":32.195999764,"data":"[NbConvertApp] Converting notebook __notebook__.ipynb to notebook\n"}
+,{"stream_name":"stderr","time":32.495151687,"data":"[NbConvertApp] Writing 298530 bytes to __notebook__.ipynb\n"}
+,{"stream_name":"stderr","time":35.069810954,"data":"[NbConvertApp] Converting notebook __notebook__.ipynb to html\n"}
+,{"stream_name":"stderr","time":35.906251534,"data":"[NbConvertApp] Writing 612920 bytes to __results__.html\n"}
+]

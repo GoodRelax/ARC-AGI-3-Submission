@@ -38,7 +38,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Tuple
 
 import numpy as np
 
@@ -273,6 +273,14 @@ class OurSearchAgent(Agent):
         # reduces distance, so it never blocks the exploration that grounds effects.
         self._navigate_on = self._read_navigate_toggle()
 
+        # GOAL-MARKER detector (the single unblock for distinct-cell-goal games).
+        # Toggle (default ON, ★★): when ON, a non-field object whose dominant colour
+        # is RARE on the board is stamped `marked`, firing the has(marked) arm of the
+        # roles.tsv `target` recognizer so NAVIGATE + the LLM observation get a target.
+        # OFF -> marked never set -> `target` only fires on the box-enclosure arm
+        # (byte-identical to today). See _read_marked_toggle for the ★★ trade-off.
+        self._marked_on = self._read_marked_toggle()
+
         # Capture writer: a line-buffered JSONL sink, opened once, gated on
         # ARC_INTROSPECT (a path). Fully inert (None) when the env var is unset.
         self._capture_writer = None
@@ -375,6 +383,32 @@ class OurSearchAgent(Agent):
         the baseline runs) until effects are grounded and a target is present, so the
         early-game exploration that grounds those effects is unchanged."""
         raw = os.getenv("ARC_NAVIGATE")
+        if raw is None:
+            return True
+        token = raw.strip().lower()
+        if token in ("0", "off", "false", "no"):
+            return False
+        return True
+
+    @staticmethod
+    def _read_marked_toggle() -> bool:
+        """Read the ARC_MARKED toggle (default ON). Unset or a truthy token
+        ("1"/"on"/"true"/"yes") -> ON; a falsy token ("0"/"off"/"false"/"no") -> OFF.
+        Any other value falls back to ON (fail-safe).
+
+        ON (default, ★★) wires the GENERALIZING goal-marker detector: a non-field
+        object whose dominant colour is RARE on the board (its colour covers only a
+        small fraction of the non-field cells, OR appears in <= 2 connected
+        components) is stamped ``marked`` (FeatureContext.marked), so the
+        has(marked) arm of the roles.tsv `target` recognizer fires -> NAVIGATE and
+        the LLM observation get a target to aim at (the single unblock for solving
+        distinct-cell-goal games). OFF reproduces the pre-marked baseline
+        BYTE-IDENTICALLY: marked is never set, so `target` only fires on the
+        box-enclosure arm exactly as today. The risk ON carries is false-positive
+        targets (a HUD/legend glyph is also small + rare); the conservative
+        rare-colour threshold (a board-derived fraction, no game literal) bounds it,
+        and target out-ranks the referent roles so a real goal still wins."""
+        raw = os.getenv("ARC_MARKED")
         if raw is None:
             return True
         token = raw.strip().lower()
@@ -520,12 +554,18 @@ class OurSearchAgent(Agent):
 
         # 3b. DetectFeatures per object, feeding the per-object Affordance evidence
         #     (from 3) so the behaviour modifiers (movable / static / ...) are honest.
+        #     GOAL-MARKER (ARC_MARKED, default ON): compute the board-context rare-
+        #     colour `marked` set ONCE over the whole frame, then relay it per object
+        #     (mirrors is_field). Empty set when OFF -> marked never stamped (byte-
+        #     identical baseline).
+        marked_ids = self._marked_object_ids(parse, grid) if self._marked_on else frozenset()
         for obj in parse.objects:
             ctx = FeatureContext(
                 cells=obj.cells,
                 color_counts=self._color_counts(obj.cells, grid),
                 is_field=self._is_field(obj, parse),
                 affordance=self._affordance_evidence.get(obj.id),
+                marked=obj.id in marked_ids,
             )
             obj.profile = detect_features(ctx, self.assets.lexicon)
 
@@ -2052,6 +2092,90 @@ class OurSearchAgent(Agent):
         except (ValueError, IndexError):
             return False
         return leaf_id in parse.field_ids
+
+    # GOAL-MARKER threshold: a colour is RARE if its total non-field cell count is
+    # at most this FRACTION of all non-field cells. Board-DERIVED (a fraction, not a
+    # game literal): conservative so a HUD/legend glyph that happens to be small but
+    # whose colour tiles a large strip is NOT marked, while a tiny isolated goal dot
+    # is. The component-count escape (<= this many connected components of the
+    # colour) catches a rare colour used by only one or two distinct objects even if
+    # those objects are not minuscule. Both are board-relative, no magic per game.
+    _MARKED_RARE_AREA_FRACTION = 0.05
+    _MARKED_RARE_MAX_COMPONENTS = 2
+
+    def _marked_object_ids(self, parse: Any, grid: Any) -> FrozenSet[str]:
+        """The ids of top-level objects that are GOAL-MARKERS by the generalizing
+        rare-colour rule (no game literal): a NON-FIELD object whose DOMINANT colour
+        is rare over the board -- its colour's total NON-FIELD cell area is at most
+        ``_MARKED_RARE_AREA_FRACTION`` of all non-field cells, OR that colour appears
+        in at most ``_MARKED_RARE_MAX_COMPONENTS`` top-level non-field objects --
+        EXCEPT the single most-common non-field colour (the foreground bulk), which
+        is never a marker (it guards the component escape from firing when the board
+        has only a couple of non-field objects).
+
+        Board context (the per-colour non-field census) is computed ONCE here, then
+        each object is tested against it. Deterministic (DP-10): sorted/stable
+        iteration, no RNG / builtin hash. Returns ``frozenset()`` if there are no
+        non-field cells (total-function guard) -- nothing is marked.
+
+        The controllable is NOT excluded here on purpose: it gets `controllable` in
+        Wave A and `target` is a Wave-C predicate over the REMAINING objects, so a
+        rare-coloured avatar still won't be claimed as target. Field objects ARE
+        excluded (a marker is a foreground signal, not the background plane)."""
+        objects = list(getattr(parse, "objects", []) or [])
+        if not objects:
+            return frozenset()
+
+        # Per-object dominant colour + non-field flag (one pass, stable order).
+        dom: Dict[str, Optional[int]] = {}
+        non_field: Dict[str, bool] = {}
+        for obj in objects:
+            non_field[obj.id] = not self._is_field(obj, parse)
+            dom[obj.id] = attributes.dominant_color(self._color_counts(obj.cells, grid))
+
+        # Board census over NON-FIELD objects only: per-colour total cell area and
+        # the count of distinct non-field objects (components) carrying that colour.
+        color_area: Dict[int, int] = {}
+        color_components: Dict[int, int] = {}
+        for obj in objects:
+            if not non_field[obj.id]:
+                continue
+            color = dom[obj.id]
+            if color is None:
+                continue
+            color_area[color] = color_area.get(color, 0) + len(obj.cells)
+            color_components[color] = color_components.get(color, 0) + 1
+
+        total_non_field = sum(color_area.values())
+        if total_non_field <= 0:
+            return frozenset()
+        area_threshold = self._MARKED_RARE_AREA_FRACTION * total_non_field
+
+        # The single most-common non-field colour (largest area; ties -> lowest
+        # index, DP-10) is the foreground "bulk" -- it is NEVER a marker regardless
+        # of its component count. This guards the component-count escape from
+        # firing on an area-DOMINANT colour when the board has only a couple of
+        # non-field objects (then every colour trivially has <= 2 components): a
+        # colour covering most of the foreground is not rare. The component escape
+        # then only catches a genuinely small-footprint colour used by 1-2 objects.
+        bulk_color = min(color_area, key=lambda c: (-color_area[c], c))
+
+        def _is_rare(color: int) -> bool:
+            if color == bulk_color:
+                return False  # the foreground bulk is never a marker
+            return (
+                color_area[color] <= area_threshold
+                or color_components[color] <= self._MARKED_RARE_MAX_COMPONENTS
+            )
+
+        marked = {
+            obj.id
+            for obj in objects
+            if non_field[obj.id]
+            and dom[obj.id] is not None
+            and _is_rare(dom[obj.id])
+        }
+        return frozenset(marked)
 
     # -- observability record (ARC_DATAFLOW) -------------------------------- #
 
