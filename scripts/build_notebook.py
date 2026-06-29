@@ -28,7 +28,7 @@ from textwrap import dedent
 #   "rtx6000"  — Nvidia RTX 6000 (g4-standard-48). ARC-AGI-3 exclusive,
 #                burns GPU quota faster — use only when you're confident.
 # ─────────────────────────────────────────────────────────────────────────────
-ACCELERATOR = "t4"
+ACCELERATOR = "cpu"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LOCAL-LLM (Qwen) move proposer. When ENABLE_LLM is True the competition cell
@@ -48,7 +48,7 @@ ACCELERATOR = "t4"
 # That is the whole classical recipe: ACCELERATOR=cpu, ENABLE_LLM=False, drop
 # model_sources (manual), drop dataset_sources (automatic).
 # ─────────────────────────────────────────────────────────────────────────────
-ENABLE_LLM = True
+ENABLE_LLM = False
 # Offline constrained-decoding wheels (transformers 4.44.2 + lm-format-enforcer
 # 0.10.9 + transitive deps) live in this Kaggle Dataset; attached via
 # dataset_sources when ENABLE_LLM. Cleared automatically for the classical build.

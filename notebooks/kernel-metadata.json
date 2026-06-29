@@ -5,18 +5,14 @@
   "language": "python",
   "kernel_type": "notebook",
   "is_private": true,
-  "enable_gpu": true,
+  "enable_gpu": false,
   "enable_tpu": false,
   "enable_internet": false,
   "keywords": [],
-  "dataset_sources": [
-    "goodrelax/arc-agi3-llm-wheels"
-  ],
+  "dataset_sources": [],
   "kernel_sources": [],
   "competition_sources": [
     "arc-prize-2026-arc-agi-3"
   ],
-  "model_sources": [
-    "qwen-lm/qwen2.5/transformers/1.5b-instruct/1"
-  ]
+  "model_sources": []
 }

@@ -298,6 +298,17 @@ class OurSearchAgent(Agent):
         # move this turn (else None -> the baseline coverage lattice is used). Parallel
         # to _llm_click_xy but for the classical leg. Reset each turn.
         self._classical_click_xy: Optional[Tuple[int, int]] = None
+        # No-progress streak (consecutive unchanged masked boards) -- gates
+        # navigate / click-navigate so they only fire when the round-robin is STUCK.
+        self._no_progress_streak: int = 0
+        self._prev_mhash: Optional[bytes] = None
+        # Turns of no board change before navigate/click-navigate may deviate from
+        # the round-robin (conservative: brief stalls don't trigger wrong-target aiming).
+        # Env-tunable (ARC_AIM_STUCK) for offline config sweeps; default 6.
+        try:
+            self._AIM_STUCK_TURNS: int = int(os.environ.get("ARC_AIM_STUCK", "6"))
+        except (TypeError, ValueError):
+            self._AIM_STUCK_TURNS = 6
 
         # GOAL-MARKER detector (the single unblock for distinct-cell-goal games).
         # Toggle (default ON, ★★): when ON, a non-field object whose dominant colour
@@ -655,7 +666,19 @@ class OurSearchAgent(Agent):
         self._classical_click_xy = None
         nav_id = None
         click_nav = None
-        if self._navigate_on:
+        # NO-PROGRESS STREAK: consecutive turns the masked board has NOT changed
+        # (the blind round-robin is stuck). navigate / click-navigate -- which
+        # DEVIATE from the productive round-robin (the cycle empirically solves
+        # e.g. cd82/sp80 by blind coverage; targeting wrong markers BREAKS those) --
+        # only fire once the baseline is genuinely STUCK. So a game the cycle solves
+        # keeps its winning cycle, and only a stalled game falls through to aiming.
+        if cur_mhash is not None and cur_mhash == self._prev_mhash:
+            self._no_progress_streak += 1
+        else:
+            self._no_progress_streak = 0
+        self._prev_mhash = cur_mhash
+        aim_stuck = self._no_progress_streak >= self._AIM_STUCK_TURNS
+        if self._navigate_on and aim_stuck:
             try:
                 nav_id = self._navigate_move(
                     situation, parse, latest_frame, legal_nonreset, cur_mhash
@@ -666,7 +689,7 @@ class OurSearchAgent(Agent):
         if nav_id is not None:
             classical_id = nav_id
             classical_source = "navigate"
-        elif self._navigate_on:
+        elif self._navigate_on and aim_stuck:
             # CLICK-NAVIGATE: directional navigate had nothing (no controllable+target
             # grounded move). If a click action is legal AND a target exists, click a
             # real target centroid (the classical side, not the LLM, decides the coord).
