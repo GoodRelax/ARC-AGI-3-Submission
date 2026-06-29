@@ -6,10 +6,16 @@ unexpected errors**. **NOT a score attempt.** Honest expectation: score ~0 — t
 proposer FIRES but does not yet SOLVE any game (verified: 3 games tested offline on
 practice, 0 solved). Treat a clean Phase-B run (no crash) as success.
 
-## State (already built & verified — 2026-06-29)
+## State (already built & verified — 2026-06-29, final build)
 Everything here is ready. `notebooks/submission.ipynb` + `agent/my_agent.py` were
-freshly built from the current navigate-enabled agent and checked:
-- bundle = 30 files incl. `agent/assets/prompts/{prompt-template.md,*-schema.json}` + navigate `search_agent.py`.
+freshly built from the latest agent and checked:
+- bundle = 30 files incl. `agent/assets/prompts/{prompt-template.md,*-schema.json}` and the
+  full solving layer in `search_agent.py`: **marked** goal-marker detector (fires the `target`
+  role) + greedy/**BFS navigate** (routes the controllable around walls) + **click-navigate**
+  (clicks a target centroid on click games) + the offline-Qwen LLM proposer. Gate-green
+  (pytest 527). Offline-verified on T4: runs end-to-end, LLM drives, no crash; **0 levels
+  solved** (maze/routing/which-target win-conditions are beyond greedy+BFS+1.5B today — expect
+  ~0 score; this is the no-crash pipeline validation).
 - notebook offline-deps cell: glob-auto-discovers the wheels dir, then `pip install --no-index --find-links <dir> transformers==4.44.2 lm-format-enforcer==0.10.9` (guarded → graceful classical fallback if it fails).
 - `notebooks/kernel-metadata.json`: id `goodrelax/arc-prize-2026-arc-agi-3-starter`, `enable_internet:false`, `enable_gpu:true`, `dataset_sources:["goodrelax/arc-agi3-llm-wheels"]`, `model_sources:["qwen-lm/qwen2.5/transformers/1.5b-instruct/1"]`.
 
