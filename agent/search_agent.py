@@ -273,6 +273,32 @@ class OurSearchAgent(Agent):
         # reduces distance, so it never blocks the exploration that grounds effects.
         self._navigate_on = self._read_navigate_toggle()
 
+        # CLICK-NAVIGATE (GAP-1 for click-driven games). Gated under the SAME
+        # ARC_NAVIGATE toggle as directional navigate (OFF -> byte-identical to today,
+        # no click-navigate). When a click action (ACTION6) is legal AND a `target`-role
+        # object exists, the classical side clicks a real TARGET CENTROID rather than
+        # leaving the click coordinate to the 1.5B LLM (which emits garbage coords). It
+        # is deterministic AND exploratory across turns: a per-game ordered list of
+        # distinct target centroids (sorted area-asc, row, col -> rarest/smallest first)
+        # is round-robined on no-progress (the masked board hash did not change), so it
+        # tries each marked target until one wins, without any RNG.
+        #
+        # _click_candidate_idx is the current round-robin position; _click_last_mhash +
+        # _click_last_centroid remember the state we clicked FROM last turn so the next
+        # turn can detect no-progress and advance. All reset per game (one agent =
+        # one game; see Agent.__init__ per-game construction).
+        self._click_candidate_idx: int = 0
+        self._click_last_mhash: Optional[bytes] = None
+        self._click_last_centroid: Optional[Tuple[int, int]] = None
+        # Target centroids found NON-PROGRESSING while stuck at the current board state
+        # (a coordinate-aware futility set, since the action-id futility memory cannot
+        # distinguish two clicks). Cleared whenever the masked board hash changes.
+        self._click_futile_here: set = set()
+        # (x=col, y=row) carried by the most recent ACCEPTED classical click-navigate
+        # move this turn (else None -> the baseline coverage lattice is used). Parallel
+        # to _llm_click_xy but for the classical leg. Reset each turn.
+        self._classical_click_xy: Optional[Tuple[int, int]] = None
+
         # GOAL-MARKER detector (the single unblock for distinct-cell-goal games).
         # Toggle (default ON, ★★): when ON, a non-field object whose dominant colour
         # is RARE on the board is stamped `marked`, firing the has(marked) arm of the
@@ -626,7 +652,9 @@ class OurSearchAgent(Agent):
         legal_nonreset = [a for a in (latest_frame.available_actions or []) if a != 0]
         classical_source = "baseline"
         classical_id = baseline_id
+        self._classical_click_xy = None
         nav_id = None
+        click_nav = None
         if self._navigate_on:
             try:
                 nav_id = self._navigate_move(
@@ -638,6 +666,18 @@ class OurSearchAgent(Agent):
         if nav_id is not None:
             classical_id = nav_id
             classical_source = "navigate"
+        elif self._navigate_on:
+            # CLICK-NAVIGATE: directional navigate had nothing (no controllable+target
+            # grounded move). If a click action is legal AND a target exists, click a
+            # real target centroid (the classical side, not the LLM, decides the coord).
+            try:
+                click_nav = self._click_navigate_move(situation, latest_frame, cur_mhash)
+            except Exception as exc:  # noqa: BLE001 - click-navigate is non-load-bearing
+                logger.debug("click-navigate skipped: %r", exc)
+                click_nav = None
+            if click_nav is not None:
+                classical_id, self._classical_click_xy = click_nav
+                classical_source = "navigate"
 
         # 6b. LOCAL-LLM move proposer (API-04, OFF by default). Consulted BEFORE
         #     committing the classical move, only when it can plausibly help (a target role
@@ -651,9 +691,18 @@ class OurSearchAgent(Agent):
         llm_move = self._propose_llm_move(
             situation, parse, latest_frame, classical_id, cur_mhash
         )
-        chosen_id = llm_move if llm_move is not None else classical_id
-        if llm_move is not None:
+        # A classical CLICK-NAVIGATE move aims at a REAL target centroid the classical
+        # side computed; it beats the LLM's coordinate (a 1.5B emits degenerate click
+        # coords -- empirically (0,0)/(0,31)). So when click-navigate produced a target
+        # click, it WINS over the LLM. Otherwise the LLM proposal wins as before. (OFF
+        # path unchanged: _classical_click_xy is only set when ARC_NAVIGATE is on.)
+        if self._classical_click_xy is not None:
+            chosen_id = classical_id  # _last_move_source stays the classical "navigate"
+        elif llm_move is not None:
+            chosen_id = llm_move
             self._last_move_source = "llm"
+        else:
+            chosen_id = classical_id
         self._df(
             "action",
             self._last_move_source,
@@ -671,10 +720,16 @@ class OurSearchAgent(Agent):
         solver_id = plan.chosen.id if (plan is not None and plan.chosen) else None
         x = y = None
         if GameAction.from_id(chosen_id).is_complex():
-            # An LLM complex move carries its own (x, y); a baseline complex move uses
+            # An LLM complex move carries its own (x, y); a classical click-navigate
+            # move carries the target centroid it chose; a baseline complex move uses
             # the deterministic coverage lattice.
             if self._last_move_source == "llm" and self._llm_click_xy is not None:
                 x, y = self._llm_click_xy
+            elif (
+                self._last_move_source == "navigate"
+                and self._classical_click_xy is not None
+            ):
+                x, y = self._classical_click_xy
             else:
                 x, y = self._baseline_click_xy(grid)
         # Arm the recent_actions log for the move we are committing (its `changed`
@@ -1606,7 +1661,7 @@ class OurSearchAgent(Agent):
         dr, dc = next(iter(shifts))
         return "row %+d, col %+d" % (int(dr), int(dc))
 
-    # -- greedy navigate (GAP-1: the classical "actually solve" move) --------- #
+    # -- navigate (GAP-1: the classical "actually solve" move) ---------------- #
 
     def _navigate_move(
         self,
@@ -1616,41 +1671,182 @@ class OurSearchAgent(Agent):
         legal: List[int],
         cur_mhash: Optional[bytes],
     ) -> Optional[int]:
-        """GREEDY NAVIGATE (GAP-1): the legal action whose GROUNDED effect most reduces
-        the Manhattan (row, col) distance from the controllable centroid to the target
-        centroid, or ``None`` (-> the caller falls back to the round-robin baseline).
+        """NAVIGATE (GAP-1): pick the legal action that routes the controllable toward
+        the target, or ``None`` (-> the caller falls back to the round-robin baseline).
 
-        ``None`` (defer to the baseline) whenever:
-          * there is no recognized controllable OR no recognized target (we have no
-            goal-directed signal -> let curiosity explore), OR
-          * NO legal action has a GROUNDED single-vector effect (effects ungrounded
-            early -> the baseline still explores to ground them), OR
-          * no grounded action STRICTLY reduces the distance (target unreachable by a
-            one-step translation this turn -> defer rather than thrash).
+        Two policies, strictly ordered so BFS dominates greedy and greedy dominates
+        the baseline:
 
-        Among the legal NON-RESET actions we consider only those with a grounded,
-        single-vector ``(dr, dc)`` displacement of the controllable (read off the same
-        per-action displacement source ``build_observation`` uses, so a multi-vector /
-        ungrounded action is skipped). A KNOWN-FUTILE action this turn (the futility
-        WorkingMemory, when the toggle is on) is skipped so navigate never walks into a
-        known wall / no-op. The survivor that yields the SMALLEST post-move Manhattan
-        distance wins, but ONLY if that distance is strictly less than the current one;
-        a tie breaks by smallest action id (DP-10).
+          1. WALL-AWARE BFS (:meth:`_navigate_bfs`): a breadth-first grid-distance field
+             from the TARGET cells over WALKABLE cells (the field/background plane UNION
+             the controllable's + target's own cells; everything else = walls). The
+             action whose grounded effect lands the controllable on a WALKABLE cell with
+             the smallest BFS-distance-to-target (strictly less than the current cell's)
+             WINS. This ROUTES AROUND walls -- a corridor/maze where the target is
+             straight ahead behind a wall is solved by the around path, not the
+             into-the-wall greedy pick. Returns ``None`` when the walkable plane is
+             unknown (no usable ``parse``), the target is unreachable, or no grounded
+             action improves the BFS distance.
+          2. GREEDY MANHATTAN (:meth:`_navigate_greedy`): the legacy fallback -- the
+             grounded action that most reduces the straight-line Manhattan distance
+             controllable->target. Used when BFS declines (e.g. field detection failed).
 
-        Determinism (DP-10): centroids are integer cell means; displacements are read
-        in sorted action order; the tie-break is a strict total order. No RNG / hash."""
+        ``None`` (defer to the baseline) whenever BOTH decline -- there is no
+        recognized controllable/target, no grounded single-vector effect (effects
+        ungrounded early -> the baseline still explores to ground them), or no action
+        improves either metric. A KNOWN-FUTILE action this turn (the futility
+        WorkingMemory, when the toggle is on) is skipped by both policies so navigate
+        never walks into a known wall / no-op.
+
+        Determinism (DP-10): centroids are integer cell means; the BFS uses a
+        deterministic FIFO queue with sorted neighbour expansion; displacements are
+        read in sorted action order; every tie breaks by smallest action id. No RNG /
+        builtin hash."""
         objects_map = getattr(situation, "objects", None) or {}
         controllable_rc = self._controllable_centroid(objects_map)
         target_rc = self._target_centroid(objects_map)
         if controllable_rc is None or target_rc is None:
             return None
-
         if not legal:
             return None
         per_action = self._action_displacements(legal)
         if not per_action:
             return None
 
+        # 1. Wall-aware BFS first (strictly dominates greedy when the walkable plane
+        #    is known). Guarded: a malformed parse must not break navigate.
+        try:
+            bfs_id = self._navigate_bfs(
+                objects_map, parse, controllable_rc, target_rc, legal, per_action, cur_mhash
+            )
+        except Exception as exc:  # noqa: BLE001 - BFS is non-load-bearing; fall back
+            logger.debug("navigate BFS skipped: %r", exc)
+            bfs_id = None
+        if bfs_id is not None:
+            return bfs_id
+
+        # 2. Greedy Manhattan fallback (the legacy policy; open fields + no-parse).
+        return self._navigate_greedy(
+            controllable_rc, target_rc, legal, per_action, cur_mhash
+        )
+
+    def _click_navigate_move(
+        self,
+        situation: Any,
+        latest_frame: Any,
+        cur_mhash: Optional[bytes],
+    ) -> Optional[Tuple[int, Tuple[int, int]]]:
+        """CLICK-NAVIGATE (GAP-1 for click-driven games): when a click action
+        (ACTION6) is legal this turn AND one or more ``target``-role objects exist,
+        return ``(action6_id, (x=col, y=row))`` clicking a TARGET CENTROID, else
+        ``None`` (-> the caller falls back to the LLM proposer / baseline).
+
+        This is the classical counterpart to directional :meth:`_navigate_move` for
+        games whose ONLY usable control is a screen click. The classical side knows
+        the target centroid (the ``marked`` detector surfaces it); we click THAT rather
+        than letting the 1.5B LLM emit a garbage click coordinate.
+
+        MULTIPLE targets / round-robin exploration (deterministic, no RNG): the
+        distinct target centroids are sorted by ``(area asc, row, col)`` so the
+        rarest/smallest candidate (the most goal-like marker) is tried first. A
+        per-game index (:attr:`_click_candidate_idx`) selects the current candidate.
+        ON NO-PROGRESS -- the masked board hash did NOT change since the turn we last
+        clicked (``cur_mhash == self._click_last_mhash``) -- the index ADVANCES
+        (round-robin) so the next distinct target is tried, until one wins. A
+        candidate known-futile this turn (the futility WorkingMemory, when the toggle
+        is on) is SKIPPED. Returns ``None`` when no click is legal, no target exists,
+        or every candidate is known-futile.
+
+        Determinism (DP-10): the candidate order is content-derived (sorted by area /
+        row / col); the round-robin index lives on ``self`` and advances by +1 on
+        no-progress; no RNG / builtin hash. Respects futility."""
+        objects_map = getattr(situation, "objects", None) or {}
+        targets = objects_map.get(self._TARGET_ROLE)
+        if not targets:
+            return None
+        legal = frozenset(
+            a for a in (latest_frame.available_actions or []) if a != 0
+        )
+        action_id = self._click_action_id(legal)
+        if action_id is None:
+            return None
+
+        # Distinct target centroids, deterministically ordered (area asc, row, col):
+        # the rarest/smallest marker first. Dedupe identical centroids (several refs
+        # can share one cell footprint) keeping the smallest area seen.
+        by_centroid: Dict[Tuple[int, int], int] = {}
+        for ref in targets:
+            geom = getattr(ref, "geometry", None)
+            cells = list(getattr(geom, "cells", None) or [])
+            if not cells:
+                continue
+            rc = self._centroid_rc(ref)
+            if rc is None:
+                continue
+            area = len(cells)
+            if rc not in by_centroid or area < by_centroid[rc]:
+                by_centroid[rc] = area
+        if not by_centroid:
+            return None
+        candidates = sorted(
+            by_centroid, key=lambda rc: (by_centroid[rc], rc[0], rc[1])
+        )
+
+        # Round-robin: advance to the NEXT distinct candidate when the previous click
+        # made no progress (the masked board hash is unchanged since we last clicked).
+        # cur_mhash is None when futility is OFF -> no advance (stable single pick;
+        # OFF-path determinism preserved). A reset/level change zeroes the hash chain
+        # via the cold-start RESET, so a fresh board reads as progress (no advance).
+        no_progress = (
+            cur_mhash is not None
+            and self._click_last_mhash is not None
+            and cur_mhash == self._click_last_mhash
+        )
+        if no_progress:
+            self._click_candidate_idx += 1
+            # The candidate we just clicked from THIS state did nothing -> remember it
+            # as known-futile-this-state so we never re-pick it while stuck here (a
+            # coordinate-aware analogue of the action-id futility memory, which cannot
+            # tell two clicks apart). Cleared the moment the board changes (below).
+            if self._click_last_centroid is not None:
+                self._click_futile_here.add(self._click_last_centroid)
+        elif cur_mhash != self._click_last_mhash:
+            # The board changed (progress, reset, or first click) -> the stuck set is
+            # stale; clear it so each candidate is fresh on the new board.
+            self._click_futile_here.clear()
+
+        # Pick the current candidate, skipping any known-futile-here this turn. Scan at
+        # most len(candidates) positions from the round-robin index so a fully-futile
+        # set declines (rather than looping). Smallest-area-first order is preserved.
+        n = len(candidates)
+        for offset in range(n):
+            idx = (self._click_candidate_idx + offset) % n
+            rc = candidates[idx]
+            x, y = rc[1], rc[0]  # ACTION6 takes x=col, y=row
+            if not (0 <= x <= 63 and 0 <= y <= 63):
+                continue
+            if rc in self._click_futile_here:
+                continue
+            self._click_candidate_idx = idx
+            self._click_last_mhash = cur_mhash
+            self._click_last_centroid = rc
+            return action_id, (x, y)
+        return None
+
+    def _navigate_greedy(
+        self,
+        controllable_rc: Tuple[int, int],
+        target_rc: Tuple[int, int],
+        legal: List[int],
+        per_action: Dict[int, set],
+        cur_mhash: Optional[bytes],
+    ) -> Optional[int]:
+        """GREEDY MANHATTAN navigate (the legacy GAP-1 policy): among legal NON-RESET
+        actions with a grounded single-vector ``(dr, dc)`` controllable displacement,
+        the one whose resulting centroid has the SMALLEST post-move Manhattan distance
+        to the target, but ONLY if strictly less than the current distance; a tie
+        breaks by smallest action id (DP-10). Skips known-futile actions when the
+        futility toggle is on. ``None`` when no action strictly reduces the distance."""
         cur_dist = self._manhattan(controllable_rc, target_rc)
         best_id: Optional[int] = None
         best_dist: Optional[int] = None
@@ -1677,6 +1873,148 @@ class OurSearchAgent(Agent):
                 best_dist = new_dist
                 best_id = action_id
         return best_id
+
+    def _navigate_bfs(
+        self,
+        objects_map: Mapping[str, Any],
+        parse: Any,
+        controllable_rc: Tuple[int, int],
+        target_rc: Tuple[int, int],
+        legal: List[int],
+        per_action: Dict[int, set],
+        cur_mhash: Optional[bytes],
+    ) -> Optional[int]:
+        """WALL-AWARE BFS navigate: route the controllable toward the target THROUGH
+        the walkable plane, around walls (the local-minima fix for maze/corridor games).
+
+        Walkable cells = the FIELD/background leaf cells (perceive's field detection --
+        the plane the avatar sits on) UNION the controllable's current cells UNION the
+        target's cells; everything else (solid non-field objects) is a wall. A BFS
+        distance field is computed FROM the target cells over the walkable set with
+        4-connectivity, so ``dist[cell]`` = grid steps to the target (a cell behind a
+        wall is unreachable = effectively +inf). For each legal NON-RESET action with a
+        grounded single-vector effect, the controllable centroid is displaced; the
+        resulting cell must be WALKABLE and have a FINITE BFS distance STRICTLY LESS than
+        the controllable's current cell distance. The smallest such distance wins;
+        smallest action id breaks a tie (DP-10).
+
+        Returns ``None`` (-> greedy fallback) when the walkable plane cannot be derived
+        (no usable ``parse`` / no field cells), the controllable's current cell is not on
+        the walkable plane, the target is unreachable, or no grounded action improves the
+        BFS distance. Skips known-futile actions when the futility toggle is on.
+
+        Determinism (DP-10): the walkable/target cell sets are content-derived; the BFS
+        queue is FIFO with neighbours expanded in a fixed (sorted) order; the action scan
+        is sorted; the tie-break is a strict total order. No RNG / builtin hash. The BFS
+        is bounded by the walkable-cell count (<= board area, e.g. 64*64 = 4096), each
+        cell dequeued once -> O(cells) -- cheap even on a full 64x64 board."""
+        walkable = self._walkable_cells(objects_map, parse)
+        if not walkable:
+            return None
+        target_cells = self._role_cells(objects_map, self._TARGET_ROLE)
+        if not target_cells:
+            return None
+        # The controllable must sit on the walkable plane for a step-wise route to make
+        # sense; its centroid is the BFS source-side anchor.
+        if controllable_rc not in walkable:
+            return None
+
+        dist = self._bfs_distance_field(walkable, target_cells)
+        cur_d = dist.get(controllable_rc)
+        if cur_d is None:  # controllable can't reach the target over walkable cells
+            return None
+
+        best_id: Optional[int] = None
+        best_d: Optional[int] = None
+        for action_id in sorted(legal):
+            shifts = per_action.get(action_id)
+            if not shifts or len(shifts) != 1:
+                continue
+            if (
+                self._futility_on
+                and cur_mhash is not None
+                and self._working_memory.is_futile(cur_mhash, action_id)
+            ):
+                continue
+            dr, dc = next(iter(shifts))
+            moved = (controllable_rc[0] + int(dr), controllable_rc[1] + int(dc))
+            d = dist.get(moved)
+            if d is None:  # lands on a wall / off-plane / unreachable cell -> skip
+                continue
+            if d < cur_d and (best_d is None or d < best_d):
+                best_d = d
+                best_id = action_id
+        return best_id
+
+    def _walkable_cells(
+        self, objects_map: Mapping[str, Any], parse: Any
+    ) -> FrozenSet[Tuple[int, int]]:
+        """The WALKABLE cell set for this turn (the plane the avatar can occupy):
+        the FIELD/background leaf cells (``parse.field_ids`` via perceive's detection)
+        UNION the controllable's current cells UNION the target's cells. Everything
+        else (solid non-field objects) is a wall. Returns ``frozenset()`` when no
+        usable ``parse`` / no field cells are available (-> the caller falls back to
+        greedy). Deterministic (set union, no RNG/hash)."""
+        objects = list(getattr(parse, "objects", None) or [])
+        field_ids = getattr(parse, "field_ids", None)
+        if not objects or not field_ids:
+            return frozenset()
+        field: set = set()
+        for obj in objects:
+            if self._is_field(obj, parse):
+                field |= set(getattr(obj, "cells", None) or ())
+        if not field:
+            return frozenset()
+        walkable = field
+        walkable |= self._role_cells(objects_map, self._CONTROLLABLE_ROLE)
+        walkable |= self._role_cells(objects_map, self._TARGET_ROLE)
+        return frozenset(walkable)
+
+    def _role_cells(
+        self, objects_map: Mapping[str, Any], role: str
+    ) -> FrozenSet[Tuple[int, int]]:
+        """The union of all footprint cells of the objects bucketed under ``role``
+        in the projected situation (each ObjectRef exposes ``.geometry.cells``).
+        Returns ``frozenset()`` when the role is absent. Deterministic."""
+        cells: set = set()
+        for ref in objects_map.get(role) or ():
+            geom = getattr(ref, "geometry", None)
+            cells |= set(getattr(geom, "cells", None) or ())
+        return frozenset(cells)
+
+    @staticmethod
+    def _bfs_distance_field(
+        walkable: FrozenSet[Tuple[int, int]],
+        sources: FrozenSet[Tuple[int, int]],
+    ) -> Dict[Tuple[int, int], int]:
+        """A 4-connected BFS distance field over ``walkable``, seeded at the
+        ``sources`` cells (distance 0). Returns ``{cell: steps}`` for every walkable
+        cell REACHABLE from a source; unreachable walkable cells (behind a wall) are
+        ABSENT (a ``dict.get`` miss = +inf). Only ``sources`` that are themselves
+        walkable seed the search.
+
+        Determinism (DP-10): a FIFO queue (collections.deque) with neighbours
+        expanded in a FIXED order (down, up, right, left); each cell is enqueued at
+        most once, so the order is fully determined by the cell sets -- no RNG/hash.
+        Bounded by ``len(walkable)`` (<= board area)."""
+        from collections import deque
+
+        dist: Dict[Tuple[int, int], int] = {}
+        queue: deque = deque()
+        for cell in sources:
+            if cell in walkable and cell not in dist:
+                dist[cell] = 0
+                queue.append(cell)
+        neighbours = ((1, 0), (-1, 0), (0, 1), (0, -1))
+        while queue:
+            r, c = queue.popleft()
+            d = dist[(r, c)] + 1
+            for dr, dc in neighbours:
+                nxt = (r + dr, c + dc)
+                if nxt in walkable and nxt not in dist:
+                    dist[nxt] = d
+                    queue.append(nxt)
+        return dist
 
     def _target_centroid(
         self, objects_map: Mapping[str, Any]
