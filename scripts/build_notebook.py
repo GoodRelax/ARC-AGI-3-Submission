@@ -28,7 +28,36 @@ from textwrap import dedent
 #   "rtx6000"  — Nvidia RTX 6000 (g4-standard-48). ARC-AGI-3 exclusive,
 #                burns GPU quota faster — use only when you're confident.
 # ─────────────────────────────────────────────────────────────────────────────
-ACCELERATOR = "cpu"
+ACCELERATOR = "t4"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LOCAL-LLM (Qwen) move proposer. When ENABLE_LLM is True the competition cell
+# exports ARC_LLM=1 + ARC_LLM_MODEL=<mount> so the agent's _build_llm activates
+# the offline QwenGenerator; the Qwen weights are mounted via model_sources in
+# notebooks/kernel-metadata.json. The agent gracefully degrades to the classical
+# NullGenerator if the mount/load fails, so this is low-risk.
+#
+# TO BUILD THE CLASSICAL v14 VARIANT (CPU, no model, no LLM): flip the two
+# constants below, then re-run `python scripts/build_notebook.py`:
+#   1. ACCELERATOR = "cpu"   -> metadata enable_gpu=false (synced in main()).
+#   2. ENABLE_LLM   = False  -> no ARC_LLM env exported (pure classical), the
+#                               offline-deps cell is dropped, AND dataset_sources
+#                               is cleared automatically (synced in main()).
+# Then MANUALLY remove the Qwen entry from "model_sources" in
+# notebooks/kernel-metadata.json (model_sources is hand-maintained, not synced).
+# That is the whole classical recipe: ACCELERATOR=cpu, ENABLE_LLM=False, drop
+# model_sources (manual), drop dataset_sources (automatic).
+# ─────────────────────────────────────────────────────────────────────────────
+ENABLE_LLM = True
+# Offline constrained-decoding wheels (transformers 4.44.2 + lm-format-enforcer
+# 0.10.9 + transitive deps) live in this Kaggle Dataset; attached via
+# dataset_sources when ENABLE_LLM. Cleared automatically for the classical build.
+WHEELS_DATASET_SLUG = "goodrelax/arc-agi3-llm-wheels"
+# Kaggle mounts a model_sources slug "<owner>/<model>/<framework>/<variation>/
+# <version>" at /kaggle/input/<owner>/<model>/<framework>/<variation>/<version>.
+# The agent's _resolve_model_path auto-discovers config.json under this root, so
+# a nested version dir still resolves even if the exact leaf differs.
+LLM_MODEL_MOUNT = "/kaggle/input/qwen-lm/qwen2.5/transformers/1.5b-instruct/1"
 
 # Internal mapping; don't edit unless Kaggle adds new options.
 _ACCELERATORS = {
@@ -67,6 +96,50 @@ def build() -> dict:
         "!pip install --no-index --find-links \\\n"
         "    /kaggle/input/competitions/arc-prize-2026-arc-agi-3/arc_agi_3_wheels \\\n"
         "    arc-agi python-dotenv"
+    )
+
+    # OFFLINE constrained-decoding deps. enable_internet=false forbids internet
+    # pip, so transformers==4.44.2 + lm-format-enforcer==0.10.9 (+ transitive
+    # deps) must come from an attached wheels dataset installed with --no-index.
+    # The Kaggle base image ships transformers 5.0.0, which removed LogitsWarper /
+    # moved PreTrainedTokenizerBase and breaks lmfe's import; this DOWNGRADE to
+    # 4.44.2 must run BEFORE any transformers import (i.e. before the run cell's
+    # `python main.py` subprocess lazily imports torch/transformers).
+    #
+    # The wheels dataset mounts under a NESTED path
+    # (/kaggle/input/datasets/<owner>/<name>/), so we AUTO-DISCOVER the wheel dir
+    # at runtime via a recursive glob rather than hard-coding the mount. The whole
+    # step is guarded (try/except + check): if the dataset is absent (e.g. the
+    # classical build) it is a harmless no-op and the agent degrades to the
+    # classical NullGenerator — it never crashes the scored run.
+    offline_deps_cell = code_cell(
+        dedent(
+            """\
+            # Offline install of the constrained-decoding deps from the wheels
+            # dataset (auto-discovered; no-op + graceful if the dataset is absent).
+            import glob, os, subprocess, sys
+
+            _whls = glob.glob('/kaggle/input/**/*.whl', recursive=True)
+            if _whls:
+                _wheel_dir = os.path.dirname(sorted(_whls)[0])
+                print(f'[offline-deps] wheel dir: {_wheel_dir} ({len(_whls)} wheels)')
+                try:
+                    subprocess.run(
+                        [sys.executable, '-m', 'pip', 'install', '--no-index',
+                         '--find-links', _wheel_dir,
+                         'transformers==4.44.2', 'lm-format-enforcer==0.10.9'],
+                        check=True,
+                    )
+                    print('[offline-deps] installed transformers==4.44.2 + '
+                          'lm-format-enforcer==0.10.9')
+                except Exception as exc:  # degrade to classical, never crash
+                    print(f'[offline-deps] install FAILED ({exc}); agent will '
+                          'run classically (unconstrained/NullGenerator).')
+            else:
+                print('[offline-deps] no wheels dataset mounted; skipping '
+                      '(classical build or detached dataset).')
+            """
+        )
     )
 
     # We write the agent to /tmp/ (not /kaggle/working/) so it does NOT appear
@@ -128,9 +201,24 @@ def build() -> dict:
             # Run it. The gateway records every action and emits submission.parquet.
             !cd /kaggle/working/ARC-AGI-3-Agents && \\
                 MPLBACKEND=agg \\
-                python main.py --agent myagent
+__LLM_ENV__                python main.py --agent myagent
         """
     )
+    # LOCAL-LLM env: when ENABLE_LLM, export ARC_LLM=1 + ARC_LLM_MODEL=<mount> so
+    # the agent's _build_llm activates the offline Qwen backend. If the model
+    # doesn't mount / fails to load, the agent degrades to NullGenerator
+    # (classical) — never crashes. Each line is a shell `VAR=val \` continuation
+    # spliced INTO the `!cd ... && ...` command above (so they apply to main.py).
+    # We use a literal-token replace (not str.format) because the run cell body
+    # contains unescaped { } braces (the rewritten agents/__init__.py dict).
+    if ENABLE_LLM:
+        llm_env = (
+            "                ARC_LLM=1 \\\n"
+            f"                ARC_LLM_MODEL={LLM_MODEL_MOUNT} \\\n"
+        )
+    else:
+        llm_env = ""
+    run_cell_source = run_cell_source.replace("__LLM_ENV__", llm_env)
     run_cell = code_cell(run_cell_source)
 
     dummy_submission_cell = code_cell(
@@ -189,6 +277,10 @@ def build() -> dict:
                 "`make submit`."
             ),
             install_cell,
+            # Offline LLM deps only when ENABLE_LLM (the classical build omits the
+            # wheels dataset entirely, so the cell would be a pure no-op anyway;
+            # we drop it for a cleaner classical notebook).
+            *( [offline_deps_cell] if ENABLE_LLM else [] ),
             write_agent_cell,
             run_cell,
             dummy_submission_cell,
@@ -204,15 +296,28 @@ def main() -> None:
           f"(accelerator: {ACCELERATOR})")
 
     # Keep notebooks/kernel-metadata.json in sync so the user never has to
-    # edit it just to flip CPU ↔ GPU.
+    # edit it just to flip CPU <-> GPU or LLM on/off. We sync both enable_gpu
+    # (from ACCELERATOR) and dataset_sources (the wheels, from ENABLE_LLM); the
+    # Qwen model_sources entry stays hand-maintained.
     if METADATA_PATH.exists():
         meta = json.loads(METADATA_PATH.read_text())
-        wanted = _ACCELERATORS[ACCELERATOR]["gpu"]
-        if meta.get("enable_gpu") != wanted:
-            meta["enable_gpu"] = wanted
+        changed = False
+
+        wanted_gpu = _ACCELERATORS[ACCELERATOR]["gpu"]
+        if meta.get("enable_gpu") != wanted_gpu:
+            meta["enable_gpu"] = wanted_gpu
+            changed = True
+            print(f"[build_notebook] Synced enable_gpu={wanted_gpu}")
+
+        wanted_datasets = [WHEELS_DATASET_SLUG] if ENABLE_LLM else []
+        if meta.get("dataset_sources") != wanted_datasets:
+            meta["dataset_sources"] = wanted_datasets
+            changed = True
+            print(f"[build_notebook] Synced dataset_sources={wanted_datasets}")
+
+        if changed:
             METADATA_PATH.write_text(json.dumps(meta, indent=2) + "\n")
-            print(f"[build_notebook] Synced enable_gpu={wanted} in "
-                  f"{METADATA_PATH.relative_to(ROOT)}")
+            print(f"[build_notebook] Updated {METADATA_PATH.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":

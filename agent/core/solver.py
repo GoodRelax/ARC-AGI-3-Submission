@@ -1,1331 +1,819 @@
-"""[agent/core] solver -- the ONE Solver of the slice: bounded BFS over the AbstractSituation.
+"""Solver selection / ranking / staged escalation — the SelectSolver cluster.
 
-State = (controllable_pos, carried_pose, consumed_triggers). Transitions come from the
-learned WorldModel (move_delta + footprint passability + trigger->pose_succ). Two searches:
-  * ``bfs_solve`` -- shortest actions to WIN (footprint inside container AND carried pose ==
-    target pose); the orientation axis is part of the state, so a delivery in the wrong
-    orientation is not mistaken for a win.
-  * ``bfs_to`` -- shortest actions so the footprint OVERLAPS some cells (curiosity navigation
-    to provoke an unknown interaction).
+The descriptor-only realization of the domain ``Solver`` dispatch (stage 6-3.7).
+It ports the plug-architecture ``SolverContext`` (Port) / ``SolverLibrary`` /
+``SelectSolver`` / ``ScoreCandidates`` cluster against the live data model
+(``agent.core.model.Solver`` «value», seeded from ``agent/assets/solvers.tsv``).
+
+SCOPE — descriptor-only (★★). :class:`SelectSolver` chooses WHICH typed solver
+family applies and returns a :class:`SolverPlan` DESCRIPTOR (chosen solver(s) +
+rank trace + why). It does NOT execute the 47 concrete backend algorithms
+(z3 / ortools / networkx / pymunk / ...): those Adapters live behind the three
+``backend`` ports (SearchHeuristic / ConstrainedGenerator / Simulator) and are a
+later step. It also does NOT do navigate A* / ConcreteSituation grounding — the
+selector runs on the abstract :class:`agent.core.situation.AbstractSituation`.
+Identity note: the ``shortest_path`` Solver IS the ``navigate`` family (domain
+``navigate`` Solver, position axis); when realized its concrete backend runs A*
+on a ConcreteSituation while every other family stays abstract.
+
+The selection model (plug-architecture / domain v031 Solver entity):
+  * ``StructuralSignature`` — the recognition key: the Goal's logical form +
+    derived ``goal_kind`` (FK), and the World's transition structure (a small
+    deterministic label set). :func:`signature_of` builds it.
+  * ``applicability`` — the signature-match score in [0, 1] = goal_kind FK
+    exact-match x world_signature keyword-overlap (signature v1).
+  * ``confidence`` — the observation-updated posterior :class:`ScoreCandidates`
+    keeps (same shape as ``InteractionRule.confidence`` / ``affordance_evidence``
+    running fractions — deterministic, no RNG, no builtin ``hash()``).
+
+Determinism (DP-10): every ordering is TOTAL with an explicit id-ascending
+tie-break; the escalation synthesize loop is bounded by a hard attempt cap; no
+builtin ``hash()`` / RNG anywhere. NULL FALLBACK (DP-20 / NFR-1):
+:meth:`SelectSolver.solve` ALWAYS returns a bounded :class:`SolverPlan` — with a
+:class:`agent.core.llm.NullGenerator` it falls back to the highest-applicability
+prior solver, never None and never blocking.
+
+Naming matches the plug-architecture vocabulary exactly (``SolverContext`` Port,
+``StructuralSignature`` + ``signature_of``, ``SolverPlan`` result descriptor,
+``applicability`` / ``confidence``). ``SolverPlan`` does NOT collide with the
+domain ``GamePlan`` (a different, retired name).
+
+Mirrors the module style of ``agent.core.model`` / ``agent.core.world_model``
+(frozen ``@dataclass`` for «value», plain ``@dataclass`` for runtime entities,
+rich docstrings, controlled vocabularies as module-level maps).
 """
 
 from __future__ import annotations
 
-from collections import deque
+from dataclasses import dataclass, field, replace
+from typing import (
+    Any,
+    Dict,
+    FrozenSet,
+    List,
+    Optional,
+    Tuple,
+    Union,
+)
+
+from agent.core.llm import ConstrainedGenerator, NullGenerator, consult
+from agent.core.model import Goal, GoalPattern, Solver
+from agent.core.world_model import _TERMINAL_FEATURES
+
+# --------------------------------------------------------------------------- #
+# Verification-horizon cost map (DP-10 ranking key). Free-text horizon ->
+# numeric cost; cheaper-to-verify solvers rank first (RHAE: fewer wasted moves
+# before the sim can disprove the plan). The map is the SSOT for the order.
+# --------------------------------------------------------------------------- #
+
+# The literal free-text horizon labels in solvers.tsv -> numeric cost.
+_HORIZON_COST: Dict[str, int] = {
+    "~0": 0,
+    "low": 1,
+    "low-med": 2,
+    "med": 3,
+    "med-high": 4,
+    "high": 5,
+}
+
+# Unknown / unmappable horizon (defensive): treat as the most expensive (5) so an
+# un-recognised row never sorts ahead of a known-cheap one.
+_HORIZON_UNKNOWN = 5
+
+# The composite row's horizon is the free text "max(parts)": its cost is derived
+# as the max over the row's parts' costs at runtime (a composite is only as cheap
+# as its most expensive sub-solver). This is the literal that triggers that path.
+_HORIZON_MAX_PARTS = "max(parts)"
 
 
-def _foot(offsets, pos):
-    r0, c0 = pos
-    return set((r0 + dr, c0 + dc) for dr, dc in offsets)
+# --------------------------------------------------------------------------- #
+# SolverContext (Port) — the read-only bundle a selection runs against.
+# --------------------------------------------------------------------------- #
 
-
-def _won(pos, pose, target_pose, offsets, container):
-    return pose == target_pose and _foot(offsets, pos) <= container
-
-
-def bfs_solve(model, grid, offsets, start_pos, start_pose, target_pose, container,
-              max_depth=120, max_expand=40000):
-    if _won(start_pos, start_pose, target_pose, offsets, container):
-        return []
-    start = (start_pos, start_pose, frozenset())
-    seen = {start}
-    q = deque([(start, [])])
-    expand = 0
-    while q and expand < max_expand:
-        (pos, pose, cons), path = q.popleft()
-        expand += 1
-        if len(path) >= max_depth:
-            continue
-        for a, (dr, dc) in model.move_delta.items():
-            npos = (pos[0] + dr, pos[1] + dc)
-            if not model.footprint_passable(grid, offsets, npos, container):
-                continue
-            foot = _foot(offsets, npos)
-            npose, ncons = pose, cons
-            for i, trig in enumerate(model.triggers):
-                if i not in cons and (foot & trig):
-                    ncons = ncons | {i}
-                    if pose in model.pose_succ:
-                        npose = model.pose_succ[pose]
-            key = (npos, npose, ncons)
-            if key in seen:
-                continue
-            seen.add(key)
-            if _won(npos, npose, target_pose, offsets, container):
-                return path + [a]
-            q.append(((npos, npose, ncons), path + [a]))
-    return None
-
-
-def bfs_to(model, grid, offsets, start_pos, goal_cells, allow=frozenset(),
-           max_depth=120, max_expand=40000):
-    """Shortest actions so the controllable footprint overlaps ``goal_cells``."""
-    if _foot(offsets, start_pos) & goal_cells:
-        return []
-    seen = {start_pos}
-    q = deque([(start_pos, [])])
-    expand = 0
-    while q and expand < max_expand:
-        pos, path = q.popleft()
-        expand += 1
-        if len(path) >= max_depth:
-            continue
-        for a, (dr, dc) in model.move_delta.items():
-            npos = (pos[0] + dr, pos[1] + dc)
-            if npos in seen:
-                continue
-            if not model.footprint_passable(grid, offsets, npos, allow):
-                continue
-            seen.add(npos)
-            if _foot(offsets, npos) & goal_cells:
-                return path + [a]
-            q.append((npos, path + [a]))
-    return None
-
-
-# =====================================================================================
-# Solver / planning (core) cluster -- PlanMoves simulated look-ahead (CMP-28),
-# CheckFutility prune (CMP-31), Milestone-roadmap ordering. Built ON TOP of the L1 BFS
-# above (which stays the byte-for-byte concrete grid search ``play.py`` imports). This layer
-# plans over the *abstract* AbstractSituation (agent/core/situation.py) using the GENERAL built-in
-# simulator (world_model.ModelWorld.predict) ranked by the GoalPredicate distance
-# (SearchHeuristic, API-05), so it is game-literal-free (NFR-6) and deterministic (DP-10:
-# canonical tie-breaks / no RNG / no builtin ``hash()`` for stable identity).
-#
-# Canon (cite, never duplicate):
-#   - _assets/gr-arc-3-terms.md
-#       TERM-13 BuiltInSimulator  -- the in-house approximate sim; look-ahead + verify at ZERO
-#                                    scored moves (RHAE-0); ``action`` is the SOLE scored unit.
-#       TERM-31 AbstractSituation         -- the «value» search node; canonical() is a stable memo key.
-#   - _assets/gr-arc-3-domain-model.md
-#       GamePlan := ordered moves 1..* (by-value GameMove list); aims at the CURRENT Milestone;
-#         the predicted trajectory is NOT stored -- re-derived from WorldModel.predict each turn.
-#       Solver -> produces -> GamePlan; Conception owns the plan + the ordered Milestone roadmap.
-#       Milestone := one ordered step; roadmap order is a HARD track a fixed implementation
-#         enforces (NOT delegated to an LLM -- the belief-agent thrash lesson).
-#       Probe ... DetectFutility -- futility's OBSERVE side (rides with play, not here).
-#   - 04-specification SC-10 (RHAE-0 look-ahead) / SC-12 (prune side) / SC-20 (roadmap order) ;
-#     05-test-strategy TS-10 / TS-12 / TS-19 ; sequence v005 (choose-action (4) PLAN look-ahead
-#     xN RHAE-0 ; #9 CheckFutility) ; Ch3 API-03 (Simulator = 0 scored moves) /
-#     API-05 (SearchHeuristic = goal distance).
-#
-# RHAE-0 (NFR-3): nothing here touches the real environment. The ONLY dynamics call is
-# ``world.predict`` (the offline sim); a planning run sends EXACTLY 0 actions to the env
-# (TS-10 asserts this with an env spy). The «GameMove» is an opaque action-id token (int);
-# no colour / coordinate / game literal is read (NFR-6).
-# =====================================================================================
-
-from dataclasses import dataclass, field
-from typing import Callable, List, Mapping, Optional, Protocol, Sequence, Tuple
-
-from .goal import And, Atom, GoalPredicate, Roadmap
-from .situation import AbstractSituation
-from .world_model import MoveEffect, classify_move_effect
-
-
-# A GameMove is the single «1手»: an opaque action-id token. The planner never interprets it
-# (no button/colour/coordinate semantics) -- it only feeds it to the sim and orders ties by it.
-GameMove = int
-
-
-class _Simulator(Protocol):
-    """The structural contract the planner needs from the built-in simulator (ModelWorld):
-    a pure ``predict(situation, move) -> next AbstractSituation`` that scores NOTHING (API-03). Any
-    object exposing this method works -- the TS-10 spy wraps a real ModelWorld to count that
-    the planner calls ONLY ``predict`` and sends 0 actions to the environment."""
-
-    def predict(self, situation: AbstractSituation, move: Optional[int]) -> AbstractSituation: ...
-
-
-# A goal-distance callable: the SearchHeuristic (API-05). ``GoalPredicate.distance`` satisfies
-# it (total, non-negative, 0-iff-test, monotone). Injected so the planner never hard-binds a
-# concrete GoalPredicate subclass and the futility classifier stays decoupled (world_model).
-Heuristic = Callable[[AbstractSituation], object]
-
-
-# ------------------------------------------------------------------------------- GamePlan
 @dataclass(frozen=True)
-class GamePlan:
-    """An ordered list of GameMove ids that a Solver produced to reach a goal (CMP-28 output).
+class SolverContext:
+    """The selection Port: everything :class:`SelectSolver` reads — a «value».
 
-    A «value» (frozen): two plans with the same ``moves`` and ``goal`` handle compare equal.
-    The predicted trajectory is deliberately NOT stored (domain model: re-derived from
-    ``predict`` each turn); only the ordered ``moves``, the ``goal_distance`` the look-ahead
-    reached (0 iff the plan satisfies its goal), and the optional ``aimed_at`` Milestone-goal
-    handle (the goal this plan was planned toward -- the current roadmap step) are kept.
+    Frozen + by-value: a selection is a pure function of its context (DP-10).
+    Fields:
+      * ``situation`` — the abstract board (:class:`AbstractSituation`) the solver
+        will run on (the selector is abstract-only; navigate/Concrete is deferred).
+      * ``world``     — the learned :class:`agent.core.world_model.WorldModel`
+        (its transition structure is the world half of the signature).
+      * ``goal``      — the :class:`agent.core.model.Goal` (its logical form +
+        derived goal_kind is the goal half of the signature).
+      * ``moves``     — the available move ids (the action alphabet; carried for
+        the concrete backend, unused by descriptor-only selection).
+      * ``consult``   — the :class:`ConstrainedGenerator` propose-only seam for
+        LLM synthesis (defaults to :class:`NullGenerator` = classical-only). The
+        master is classical and disposes; the LLM only proposes (DP-20).
+    """
 
-    Ergonomics: iterating / ``len`` / indexing a GamePlan yields its moves, so callers can do
-    ``plan[0]`` (the MPC "commit one move" idiom) or ``for m in plan`` without reaching into
-    ``.moves``. ``is_empty()`` is True for the zero-move plan (goal already satisfied, or no
-    progress possible)."""
+    situation: Any = None
+    world: Any = None
+    goal: Optional[Goal] = None
+    moves: Tuple[int, ...] = ()
+    consult: ConstrainedGenerator = field(default_factory=NullGenerator)
 
-    moves: Tuple[GameMove, ...] = ()
-    goal_distance: object = None
-    aimed_at: Optional[GoalPredicate] = None
+
+# --------------------------------------------------------------------------- #
+# StructuralSignature (value) — the recognition key (Goal logical form x World
+# transition structure). signature v1: goal_kind FK + world keyword set.
+# --------------------------------------------------------------------------- #
+
+@dataclass(frozen=True)
+class StructuralSignature:
+    """The structure key a Solver's ``applicability`` matches against — a «value».
+
+    Two halves (plug-architecture / domain v031 Solver.applicability):
+      * GOAL half — ``goal_kind`` (the FK into ``goal_kinds.tsv``, derived from the
+        Goal via :class:`GoalPattern` hints; ``None`` if no kind can be derived)
+        plus ``goal_form`` (the deterministic ``goal_canonical`` logical-form key,
+        carried for the trace / future graded matching).
+      * WORLD half — ``world_keywords`` = a small deterministic label set of the
+        World's transition structure (e.g. ``reversible`` / ``bounded-branch`` /
+        ``scrolling`` / ``stochastic`` / ``adversarial``), the overlap target for
+        the ``world_signature`` half of ``applicability``.
+
+    Frozen + a frozenset keyword field => deterministic value-equality (DP-10:
+    no RNG, no builtin ``hash()`` of mutable state)."""
+
+    goal_kind: Optional[str] = None
+    goal_form: Union[Tuple, str, None] = None
+    world_keywords: FrozenSet[str] = field(default_factory=frozenset)
+
+
+# Stop-words dropped from a Solver.world_signature before keyword overlap — pure
+# connective / filler tokens that carry no structural discrimination. Keeping the
+# set tiny and explicit keeps the overlap honest (DP-10 deterministic).
+_WORLD_STOP_WORDS: FrozenSet[str] = frozenset(
+    {
+        "a", "an", "the", "is", "are", "be", "of", "on", "in", "to", "as",
+        "and", "or", "with", "you", "your", "it", "its", "that", "this",
+        "+", "/", "(", ")",
+    }
+)
+
+
+def _world_tokens(text: str) -> FrozenSet[str]:
+    """Tokenize a free-text ``world_signature`` into a deterministic keyword set.
+
+    Lower-cased, split on non-alphanumeric runs (so ``bounded-branch`` ->
+    {``bounded``, ``branch``}), with stop-words and empty tokens dropped. Pure /
+    deterministic (no RNG): the same string always yields the same frozenset."""
+    tokens: List[str] = []
+    cur: List[str] = []
+    for ch in text.lower():
+        if ch.isalnum():
+            cur.append(ch)
+        else:
+            if cur:
+                tokens.append("".join(cur))
+                cur = []
+    if cur:
+        tokens.append("".join(cur))
+    return frozenset(t for t in tokens if t and t not in _WORLD_STOP_WORDS)
+
+
+def _world_keywords(world: Any) -> FrozenSet[str]:
+    """Derive the World transition-structure label set from a WorldModel.
+
+    A small, deterministic set of structural labels read off the model's CHEAPLY
+    AVAILABLE attributes (no game literals — NFR-6):
+      * ``scrolling``  — the frame is a window onto a larger world
+        (``WorldModel.is_scrolling``);
+      * ``bounded-branch`` — a finite move alphabet drives a bounded branching
+        factor (always true for ARC-AGI-3's fixed action set; a safe default);
+      * ``reversible`` — every learned :class:`InteractionRule` is non-terminal
+        (no loss trigger fires) — a CHEAPLY-available reversibility proxy; absent
+        when a rule can drive a gauge terminal (irreversible / hazardous). The
+        terminal-feature set is :data:`agent.core.world_model._TERMINAL_FEATURES`
+        (imported, not duplicated, so the proxy cannot drift from the SSOT).
+    The labels overlap the vocabulary the ``world_signature`` column uses
+    (``reversible`` / ``bounded-branch`` / ``scrolling``), so a signature built
+    here scores against the prior solvers without a translation table. Defensive:
+    a ``None`` / attribute-less world yields ``{bounded-branch}`` (the safe
+    default), never raises."""
+    labels = {"bounded-branch"}
+    if getattr(world, "is_scrolling", False):
+        labels.add("scrolling")
+    rules = getattr(world, "rules", None)
+    if rules is not None:
+        # Reversible proxy: no learned rule carries a terminal (loss) effect.
+        # SSOT: the terminal-feature set lives in world_model (a rule effect on a
+        # terminal axis can drive a gauge to OVER) — import it so this cheap proxy
+        # can never silently drift from the world model's own definition.
+        reversible = all(
+            not any(sig.feature in _TERMINAL_FEATURES for sig in rule.effect)
+            for rule in rules
+        )
+        if reversible:
+            labels.add("reversible")
+    return frozenset(labels)
+
+
+def _goal_kind_of(goal: Optional[Goal], assets: Any) -> Optional[str]:
+    """Derive the Goal's ``goal_kind`` FK via :class:`GoalPattern` hints (runtime
+    bridge). ``None`` if no kind can be derived (the caller then falls back to
+    world-only matching — it does NOT crash).
+
+    Bridge: a Goal carries a ``predicate`` Relation, not a goal_kind. The
+    GoalPatternLibrary (``assets.goal_patterns``) maps a goal logical-form template
+    -> ``goal_kind`` + ``solver_kinds``. v1 matches by the goal's canonical
+    logical form against each active pattern's ``predicate_tree`` canonical form;
+    the first deterministic (id-ascending) match donates its ``goal_kind``. If no
+    pattern matches (or there is no goal / no library) the result is ``None``.
+    Deterministic: patterns are visited in id-ascending order."""
+    if goal is None:
+        return None
+    patterns: Tuple[GoalPattern, ...] = tuple(getattr(assets, "goal_patterns", ()))
+    if not patterns:
+        return None
+    # Local import keeps the goal interpreter dependency lazy (avoids importing
+    # the registry-backed evaluator at module import time).
+    from agent.core.goal import canonical, goal_canonical
+
+    try:
+        goal_form = goal_canonical(goal)
+    except Exception:  # noqa: BLE001 - a malformed predicate must not crash select
+        return None
+    for pattern in sorted(patterns, key=lambda p: p.id):
+        tree = pattern.predicate_tree
+        if tree is None:
+            continue
+        if canonical(tree) == goal_form:
+            return pattern.goal_kind
+    return None
+
+
+def signature_of(
+    goal: Optional[Goal], world: Any, assets: Any
+) -> StructuralSignature:
+    """Build the :class:`StructuralSignature` for a ``(goal, world)`` pair.
+
+    The GOAL half: the goal's canonical logical form (``goal_canonical``) +
+    ``goal_kind`` derived via :func:`_goal_kind_of` (GoalPattern bridge; ``None``
+    if not derivable -> world-only matching downstream). The WORLD half:
+    :func:`_world_keywords` over the WorldModel's cheaply-available transition
+    structure. Pure + deterministic (DP-10)."""
+    goal_form: Union[Tuple, str, None] = None
+    if goal is not None:
+        from agent.core.goal import goal_canonical
+
+        try:
+            goal_form = goal_canonical(goal)
+        except Exception:  # noqa: BLE001 - tolerate a malformed predicate
+            goal_form = None
+    return StructuralSignature(
+        goal_kind=_goal_kind_of(goal, assets),
+        goal_form=goal_form,
+        world_keywords=_world_keywords(world),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# applicability (signature-match score in [0, 1]).
+# --------------------------------------------------------------------------- #
+
+def applicability(solver: Solver, signature: StructuralSignature) -> float:
+    """The signature-match score in [0, 1] (signature v1).
+
+    Two factors, AVERAGED so the score stays in [0, 1]:
+      * GOAL factor — goal_kind FK EXACT match. ``1.0`` iff the signature's
+        ``goal_kind`` is one of the solver's ``goal_kinds`` (the FK list). If the
+        signature has NO derivable goal_kind, or the solver is POLYMORPHIC (empty
+        ``goal_kinds`` — ``composite`` / ``nrpa_adaptive_playout``), the goal
+        factor is NEUTRAL (1.0): a goal-agnostic solver is not penalised on the
+        goal axis (it applies to any goal_kind), and a kind-less signature falls
+        back to world-only discrimination.
+      * WORLD factor — keyword overlap = ``|sig.world_keywords ∩
+        solver_world_tokens| / |sig.world_keywords|`` (the fraction of the
+        signature's structural labels the solver's ``world_signature`` covers).
+        Empty signature keywords => neutral 1.0 (nothing to discriminate on).
+
+    The result = ``0.5 * goal_factor + 0.5 * world_factor`` in [0, 1].
+    Deterministic / pure (DP-10). Solver-kind exact-match (not fuzzy) keeps the
+    FK semantics; world overlap is graded so a partial structural match still
+    ranks.
+
+    Combine rule = WEIGHTED AVERAGE, not a product (signature v1, deliberate).
+    The world signature is intentionally COARSE — just a few structural keywords
+    (``reversible`` / ``bounded-branch`` / ``scrolling`` / ...). A product would
+    multiply the two factors, so any solver with even partial world overlap
+    (world_factor < 1) would be dragged toward 0 and, where the world half is 0,
+    zeroed outright — forcing nearly everything to look inapplicable and escalate,
+    which defeats the whole point of ranking. The average instead keeps a solver
+    with a STRONG goal-kind match applicable even on partial world overlap (a
+    perfect goal match alone floors the score at 0.5), so the ranking still
+    discriminates. (A sharper, calibrated combine is a later signature version.)"""
+    # GOAL factor.
+    if not solver.goal_kinds or signature.goal_kind is None:
+        goal_factor = 1.0  # polymorphic solver or kind-less signature => neutral
+    else:
+        goal_factor = 1.0 if signature.goal_kind in solver.goal_kinds else 0.0
+
+    # WORLD factor.
+    sig_kw = signature.world_keywords
+    if not sig_kw:
+        world_factor = 1.0
+    else:
+        solver_kw = _world_tokens(solver.world_signature)
+        overlap = len(sig_kw & solver_kw)
+        world_factor = overlap / len(sig_kw)
+
+    return 0.5 * goal_factor + 0.5 * world_factor
+
+
+# --------------------------------------------------------------------------- #
+# Horizon cost + ranking key (DP-10 total order).
+# --------------------------------------------------------------------------- #
+
+def horizon_cost(
+    solver: Solver,
+    library: Optional["SolverLibrary"] = None,
+    _visited: Optional[FrozenSet[str]] = None,
+) -> int:
+    """The numeric verification-horizon cost of ``solver`` (cheaper = sooner a
+    bad plan is disproved; lower sorts first).
+
+    Maps the free-text ``verification_horizon`` via :data:`_HORIZON_COST`. The
+    composite literal ``"max(parts)"`` is DERIVED as the max over the row's
+    parts' costs (a composite is only as cheap as its most expensive part); an
+    empty-parts composite (the runtime-bound default) costs :data:`_HORIZON_UNKNOWN`.
+    An unmapped horizon also costs :data:`_HORIZON_UNKNOWN` (defensive). Resolving
+    parts needs the :class:`SolverLibrary` (to look the parts up by id); without
+    one a ``max(parts)`` row falls back to :data:`_HORIZON_UNKNOWN`.
+
+    Cycle-safe (DP-20: ``solve`` never raises / is always bounded). The recursion
+    over ``parts`` threads a ``_visited`` set of solver ids; a self-referential or
+    mutually-referential composite (an id re-encountered on its own resolution
+    chain) is treated as the :data:`_HORIZON_UNKNOWN` ceiling rather than
+    recursing forever. ``_visited`` is internal — callers pass only ``solver`` /
+    ``library``."""
+    horizon = solver.verification_horizon.strip()
+    if horizon == _HORIZON_MAX_PARTS:
+        if library is None or not solver.parts:
+            return _HORIZON_UNKNOWN
+        # Cycle guard: if this solver is already on the resolution chain we are in
+        # a self-/mutual-reference loop -> the unknown ceiling (never recurse).
+        if _visited is not None and solver.id in _visited:
+            return _HORIZON_UNKNOWN
+        chain = (_visited or frozenset()) | {solver.id}
+        part_costs = [
+            horizon_cost(part, library, chain)
+            for part in (library.by_id(pid) for pid in solver.parts)
+            if part is not None
+        ]
+        return max(part_costs) if part_costs else _HORIZON_UNKNOWN
+    return _HORIZON_COST.get(horizon, _HORIZON_UNKNOWN)
+
+
+def _rank_key(
+    solver: Solver, signature: StructuralSignature, library: "SolverLibrary"
+) -> Tuple[float, int, str]:
+    """The total-order ranking key (DP-10): applicability DESC, horizon_cost ASC,
+    id ASC. Negating applicability turns the DESC primary into an ASC sort so the
+    whole key sorts ascending; ``id`` is the content-stable final tie-break (every
+    solver id is unique, so the order is total)."""
+    return (
+        -applicability(solver, signature),
+        horizon_cost(solver, library),
+        solver.id,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# SolverLibrary (runtime entity) — prior catalog + synthesized additions.
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class SolverLibrary:
+    """The two-layer solver dictionary (domain v031 ``SolverLibrary`` entity).
+
+    ``prior`` = the read-only LTM catalog (``LoadedAssets.solvers`` = the
+    ``solvers.tsv`` row «value»s, seeded once at load). ``synthesized`` = the
+    per-run append log of solvers synthesized DURING this run (e.g. an LLM-proposed
+    family added by :class:`SelectSolver`). Mutable on the synthesized layer only;
+    the prior tuple is never mutated. Lookups visit prior THEN synthesized in
+    id-ascending order so :meth:`all` / :meth:`by_id` are deterministic (DP-10).
+
+    Mirrors the Lexicon's old two-layer shape, but unlike Lexicon (which folded
+    base/overlay into ``Word.origin`` in v14) the two layers live HERE — the
+    prior/synthesized split is the SolverLibrary's own structure."""
+
+    prior: Tuple[Solver, ...] = ()
+    synthesized: List[Solver] = field(default_factory=list)
+
+    @classmethod
+    def from_assets(cls, assets: Any) -> "SolverLibrary":
+        """Build a library from a ``LoadedAssets`` (its ``.solvers`` become the
+        prior layer; synthesized starts empty)."""
+        return cls(prior=tuple(getattr(assets, "solvers", ())))
+
+    def all(self) -> Tuple[Solver, ...]:
+        """Every solver (prior + synthesized), deterministic id-ascending order."""
+        return tuple(sorted((*self.prior, *self.synthesized), key=lambda s: s.id))
+
+    def by_id(self, solver_id: str) -> Optional[Solver]:
+        """The solver with this id (prior wins over a same-id synthesized; ``None``
+        if absent). Deterministic."""
+        for s in self.prior:
+            if s.id == solver_id:
+                return s
+        for s in self.synthesized:
+            if s.id == solver_id:
+                return s
+        return None
+
+    def add_synthesized(self, solver: Solver) -> Solver:
+        """Append a synthesized :class:`Solver` to the run-local layer (a no-op if
+        a solver with the same id is already present in either layer). Returns the
+        solver (the existing one if a duplicate id, else the added one)."""
+        existing = self.by_id(solver.id)
+        if existing is not None:
+            return existing
+        self.synthesized.append(solver)
+        return solver
+
+
+# --------------------------------------------------------------------------- #
+# SolverPlan (result descriptor) — the chosen solver(s) + rank trace + why.
+# --------------------------------------------------------------------------- #
+
+# How a SolverPlan was reached (the escalation tier that produced it). Strings
+# (not an Enum) for deterministic logging / equality (DP-10).
+PLAN_SOURCES = frozenset(
+    {"single", "composite", "synthesized", "null-fallback"}
+)
+
+
+@dataclass(frozen=True)
+class SolverPlan:
+    """The DESCRIPTOR :meth:`SelectSolver.solve` returns — a «value».
+
+    NOT an execution engine: it names WHICH typed solver family (or composed
+    parts) was chosen and WHY, leaving execution to the (deferred) backend
+    Adapters. Fields:
+      * ``solvers``    — the chosen :class:`Solver`(s): one for a single pick, the
+        ordered parts for a composite, the synthesized/fallback row otherwise.
+      * ``signature``  — the :class:`StructuralSignature` selection ran against.
+      * ``source``     — the escalation tier that produced the plan (a
+        :data:`PLAN_SOURCES` label: single / composite / synthesized /
+        null-fallback).
+      * ``rank_trace`` — the ranked ``(solver_id, applicability, horizon_cost)``
+        tuples that were considered (the audit trail of the order).
+      * ``why``        — a short human-readable rationale (for structured logs).
+
+    Frozen + tuple fields => deterministic value-equality (DP-10). ``SolverPlan``
+    is a distinct name from the domain ``GamePlan`` (no collision)."""
+
+    solvers: Tuple[Solver, ...] = ()
+    signature: Optional[StructuralSignature] = None
+    source: str = "single"
+    rank_trace: Tuple[Tuple[str, float, int], ...] = ()
+    why: str = ""
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "moves", tuple(self.moves))
+        if self.source not in PLAN_SOURCES:
+            raise ValueError(
+                f"SolverPlan.source {self.source!r} not in {sorted(PLAN_SOURCES)}"
+            )
 
-    def is_empty(self) -> bool:
-        """True iff the plan commits no move (goal already met, or nothing makes progress)."""
-        return len(self.moves) == 0
-
-    def first(self) -> Optional[GameMove]:
-        """The first GameMove to commit this turn (MPC), or ``None`` for an empty plan."""
-        return self.moves[0] if self.moves else None
-
-    def __iter__(self):
-        return iter(self.moves)
-
-    def __len__(self) -> int:
-        return len(self.moves)
-
-    def __getitem__(self, index):
-        return self.moves[index]
+    @property
+    def chosen(self) -> Optional[Solver]:
+        """The primary chosen solver (the first of :attr:`solvers`), or ``None``
+        for the degenerate empty plan."""
+        return self.solvers[0] if self.solvers else None
 
 
-# Default search bounds. Deterministic and game-literal-free; chosen so the abstract look-ahead
-# terminates cheaply. ``horizon`` caps plan length (look-ahead depth); ``max_expand`` caps node
-# expansions (a safety valve mirroring the L1 BFS bounds).
-DEFAULT_HORIZON: int = 32
-DEFAULT_MAX_EXPAND: int = 20000
+# --------------------------------------------------------------------------- #
+# SelectSolver (use case) — rank + staged escalation -> SolverPlan.
+# --------------------------------------------------------------------------- #
+
+# Hard attempt cap for the synthesize-escalation loop (DP-10: the loop must be
+# bounded — never spin on a generator that keeps proposing unusable rows).
+_MAX_SYNTHESIZE_ATTEMPTS = 3
+
+# The JSON schema the LLM synthesize proposal is constrained to (propose-only).
+# Mirrors the solvers.tsv columns the descriptor needs; the master disposes.
+_SYNTHESIZE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "id": {"type": "string"},
+        "category": {"type": "string"},
+        "world_signature": {"type": "string"},
+        "verification_horizon": {"type": "string"},
+        "backend": {"type": "string"},
+        "algorithm": {"type": "string"},
+        "description": {"type": "string"},
+    },
+    "required": ["id", "backend", "algorithm"],
+}
+
+_SYNTHESIZE_BACKENDS = frozenset(
+    {"SearchHeuristic", "ConstrainedGenerator", "Simulator"}
+)
 
 
-def _sorted_moves(moves: Sequence[GameMove]) -> List[GameMove]:
-    """Deterministic candidate order: ascending GameMove id (the stable tie-break, DP-10).
-    Duplicates are dropped (a move set), preserving the ascending order. No builtin ``hash``
-    is used for identity -- ints sort by value."""
-    seen: set = set()
-    out: List[GameMove] = []
-    for m in sorted(moves):
-        if m not in seen:
-            seen.add(m)
-            out.append(m)
-    return out
+def _parse_synthesized(raw: Dict[str, Any]) -> Solver:
+    """Parse an LLM synthesize proposal into a :class:`Solver` «value».
 
-
-# ---------------------------------------------------------------------------- CheckFutility
-def check_futility(
-    world: _Simulator,
-    situation: AbstractSituation,
-    goal: GoalPredicate,
-    moves: Sequence[GameMove],
-) -> List[GameMove]:
-    """CheckFutility (CMP-31): keep only the candidate moves whose PREDICTED effect is PROGRESS.
-
-    For each candidate it predicts the next AbstractSituation on the built-in sim and classifies the
-    move effect via ``classify_move_effect(situation, predict(situation, move), goal.distance)``
-    (the exact TS-12 oracle): an ``invariant`` (next AbstractSituation identical) or ``no_progress``
-    (changed but goal-distance unchanged) candidate is *futile* and is PRUNED; only a
-    ``progress`` (goal-distance decreased) candidate survives (NFR-3). Returns the surviving
-    moves in the deterministic ascending-id order.
-
-    RHAE-0: only ``world.predict`` is called -- zero actions reach the environment (the sim does
-    not score, API-03). This is the PREDICT side of futility; the OBSERVE side (DetectFutility
-    recording the *actually-played* move's MoveEffect every turn) rides with the play cluster,
-    not here (the predict/verify symmetry of SC-12)."""
-    survivors: List[GameMove] = []
-    for move in _sorted_moves(moves):
-        nxt = world.predict(situation, move)
-        effect = classify_move_effect(situation, nxt, goal.distance)
-        if not MoveEffect.futile(effect):        # effect == PROGRESS
-            survivors.append(move)
-    return survivors
-
-
-# -------------------------------------------------------------------------- PlanMoves / plan
-def plan(
-    world: _Simulator,
-    situation: AbstractSituation,
-    goal: GoalPredicate,
-    moves: Sequence[GameMove],
-    horizon: int = DEFAULT_HORIZON,
-    max_expand: int = DEFAULT_MAX_EXPAND,
-    aimed_at: Optional[GoalPredicate] = None,
-) -> GamePlan:
-    """PlanMoves (CMP-28): bounded look-ahead over the built-in sim, ranked by goal distance.
-
-    A best-first (greedy / uniform-cost-on-the-heuristic) search over ``world.predict``: from
-    ``situation`` it expands candidate ``moves`` (ascending-id), scoring each successor by
-    ``goal.distance`` (the SearchHeuristic, API-05), and returns the ordered ``GamePlan`` of
-    GameMove ids that first reaches ``goal.test`` within ``horizon`` steps. When the goal is
-    unreachable within the bounds, it returns the BEST partial plan found (the prefix that
-    minimised the goal distance) so the agent still makes progress (MPC re-plans next turn);
-    when nothing makes progress, the plan is empty.
-
-    RHAE-0 / API-03 (NFR-3): the ONLY dynamics call is ``world.predict`` -- the search is
-    entirely virtual and sends EXACTLY 0 actions to the real environment (TS-10's env-spy
-    asserts the count is 0). Determinism (DP-10): candidate moves are tried in ascending id
-    order; ties on the heuristic are broken by (shorter path, then lexicographically-smaller
-    move sequence); the visited set keys on ``AbstractSituation.canonical()`` -- never builtin ``hash``
-    of mutable state -- and no RNG is used, so the same inputs yield the same plan.
-
-    Parameters
-    ----------
-    world:
-        The built-in simulator (a :class:`world_model.ModelWorld` or any ``.predict`` provider).
-    situation:
-        The current abstract :class:`AbstractSituation` (the StateAbstraction output).
-    goal:
-        The :class:`GoalPredicate` to satisfy; ``goal.distance`` ranks moves, ``goal.test`` ends
-        the search.
-    moves:
-        The available GameMove ids (e.g. the env's available_actions, lifted to opaque tokens).
-    horizon:
-        Max plan length / look-ahead depth (a single roadmap step's reach).
-    max_expand:
-        Safety cap on node expansions (a deterministic bound, never RNG-driven).
-    aimed_at:
-        The Milestone goal this plan aims at (recorded on the returned plan for TS-19's
-        planned-toward-goal trace). Defaults to ``goal``.
-
-    Returns
-    -------
-    GamePlan
-        An ordered GameMove sequence; empty iff the goal already holds or nothing progresses.
-    """
-    aim = aimed_at if aimed_at is not None else goal
-    start_d = goal.distance(situation)
-    if goal.test(situation):
-        return GamePlan(moves=(), goal_distance=start_d, aimed_at=aim)
-
-    candidates = _sorted_moves(moves)
-    start_key = situation.canonical()
-    # best-so-far partial: the path that minimised the goal distance (for the unreachable case).
-    best_path: Tuple[GameMove, ...] = ()
-    best_d = start_d
-    # Visited set keyed on canonical AbstractSituation identity (DP-10): collapse equal salient configs.
-    seen = {start_key}
-    # Frontier ordered by (distance, depth, path) so expansion is best-first AND fully
-    # deterministic -- a smaller heuristic wins; ties prefer the shorter, then lexicographically
-    # smaller, move sequence. A plain sorted list is used (no heapq) to keep the order total and
-    # obvious; the frontier stays small under the horizon/expand bounds.
-    frontier: List[Tuple[object, int, Tuple[GameMove, ...], AbstractSituation]] = [
-        (start_d, 0, (), situation)
-    ]
-    expand = 0
-    while frontier and expand < max_expand:
-        frontier.sort(key=lambda item: (_dist_key(item[0]), item[1], item[2]))
-        _d, depth, path, state = frontier.pop(0)
-        expand += 1
-        if depth >= horizon:
-            continue
-        for move in candidates:
-            nxt = world.predict(state, move)
-            key = nxt.canonical()
-            if key in seen:
-                continue
-            seen.add(key)
-            npath = path + (move,)
-            if goal.test(nxt):
-                return GamePlan(moves=npath, goal_distance=goal.distance(nxt), aimed_at=aim)
-            nd = goal.distance(nxt)
-            if _dist_key(nd) < _dist_key(best_d):
-                best_d, best_path = nd, npath
-            frontier.append((nd, depth + 1, npath, nxt))
-    # Goal not reached within the bounds: return the best progress-making prefix (possibly
-    # empty if nothing lowered the distance). MPC re-plans next turn from the new observation.
-    return GamePlan(moves=best_path, goal_distance=best_d, aimed_at=aim)
-
-
-def _dist_key(distance: object) -> tuple:
-    """A TOTAL, deterministic ordering key for a goal distance (API-05 allows int/float/tuple).
-    Wraps the value with its type name so heterogeneous-but-comparable distances never raise on
-    ``<`` and the order is stable across processes (DP-10) -- e.g. an ``int`` 3 and a ``tuple``
-    never collide. For the homogeneous int distances ``GoalPredicate`` returns, this is just
-    the integer order."""
-    return (type(distance).__name__, distance)
+    Raises ``KeyError`` / ``ValueError`` / ``TypeError`` on a malformed proposal
+    (``consult`` swallows those into a None fallback). The backend is validated
+    against the 3 ports; goal_kinds / parts default empty (a synthesized family is
+    runtime-bound). The id is prefixed ``syn-`` so a synthesized row never shadows
+    a prior catalog id."""
+    sid = str(raw["id"]).strip()
+    if not sid:
+        raise ValueError("synthesized solver: empty id")
+    backend = str(raw["backend"]).strip()
+    if backend not in _SYNTHESIZE_BACKENDS:
+        raise ValueError(f"synthesized solver: bad backend {backend!r}")
+    algorithm = str(raw["algorithm"]).strip()
+    if not algorithm:
+        raise ValueError("synthesized solver: empty algorithm")
+    return Solver(
+        category=str(raw.get("category", "synthesized")).strip() or "synthesized",
+        id=sid if sid.startswith("syn-") else f"syn-{sid}",
+        goal_kinds=(),
+        world_signature=str(raw.get("world_signature", "")).strip(),
+        verification_horizon=str(raw.get("verification_horizon", "high")).strip()
+        or "high",
+        backend=backend,
+        parts=(),
+        algorithm=algorithm,
+        description=str(raw.get("description", "")).strip(),
+        remark="synthesized at runtime (SelectSolver + ConstrainedGenerator)",
+    )
 
 
 @dataclass
-class PlanMoves:
-    """The PlanMoves use-case object (CMP-28): plans a :class:`GamePlan` over the built-in sim.
+class SelectSolver:
+    """Solve = pick the applicable typed solver family for a context, descriptor-
+    only (domain v031 ``SelectSolver`` use case).
 
-    A thin, stateless handle (mirrors the domain-model use-case and the legacy ``Planner``
-    call shape ``PlanMoves().plan(...)``) delegating to the module-level :func:`plan` /
-    :func:`check_futility` / :func:`plan_roadmap`. Holds default search bounds so a caller can
-    fix a horizon once and re-use it each turn. No per-board state, no RNG -- deterministic."""
+    :meth:`rank` orders the library by the ranking key (applicability DESC,
+    horizon_cost ASC, id ASC). :meth:`solve` runs the staged escalation:
+      1. SINGLE      — the top-ranked applicable solver.
+      2. COMPOSITE   — if the top pick is a composite (Law E axis-factoring) with
+         bound parts, expand it into its ordered parts.
+      3. SYNTHESIZE  — if nothing applies (all applicability == 0), consult the
+         ConstrainedGenerator (bounded by :data:`_MAX_SYNTHESIZE_ATTEMPTS`) for a
+         proposed family, added to the library's synthesized layer.
+      4. NULL FALLBACK — if synthesis declines (NullGenerator / exhausted), return
+         the HIGHEST-APPLICABILITY prior solver as a bounded plan (DP-20 / NFR-1:
+         always a plan, never None, never blocking).
 
-    horizon: int = DEFAULT_HORIZON
-    max_expand: int = DEFAULT_MAX_EXPAND
+    Holds the :class:`SolverLibrary` and the ``assets`` (for the goal_kind
+    bridge). Deterministic: ranking is a total order; the synthesize loop is
+    bounded."""
 
-    def plan(
-        self,
-        world: _Simulator,
-        situation: AbstractSituation,
-        goal: GoalPredicate,
-        moves: Sequence[GameMove],
-        aimed_at: Optional[GoalPredicate] = None,
-    ) -> GamePlan:
-        """Bounded look-ahead toward ``goal`` (see :func:`plan`)."""
-        return plan(
-            world, situation, goal, moves,
-            horizon=self.horizon, max_expand=self.max_expand, aimed_at=aimed_at,
+    library: SolverLibrary
+    assets: Any = None
+
+    def rank(self, ctx: SolverContext) -> Tuple[Solver, ...]:
+        """The library ranked best-first for ``ctx`` (total order, DP-10)."""
+        signature = self._signature(ctx)
+        return tuple(
+            sorted(
+                self.library.all(),
+                key=lambda s: _rank_key(s, signature, self.library),
+            )
         )
 
-    def check_futility(
-        self,
-        world: _Simulator,
-        situation: AbstractSituation,
-        goal: GoalPredicate,
-        moves: Sequence[GameMove],
-    ) -> List[GameMove]:
-        """Prune non-progress candidates (see :func:`check_futility`)."""
-        return check_futility(world, situation, goal, moves)
+    def solve(self, ctx: SolverContext) -> SolverPlan:
+        """Run the staged escalation and return a bounded :class:`SolverPlan`.
 
-    def plan_roadmap(
+        ALWAYS returns a plan (DP-20): single -> composite -> synthesize ->
+        null-fallback. Never None, never blocking."""
+        signature = self._signature(ctx)
+        ranked = self.rank(ctx)
+        trace = self._rank_trace(ranked, signature)
+
+        top = ranked[0] if ranked else None
+        top_applicability = (
+            applicability(top, signature) if top is not None else 0.0
+        )
+
+        # 1/2. Something applies (> 0) — single, or composite expansion.
+        if top is not None and top_applicability > 0.0:
+            if self._is_composite(top) and top.parts:
+                parts = self._expand_parts(top)
+                return SolverPlan(
+                    solvers=parts,
+                    signature=signature,
+                    source="composite",
+                    rank_trace=trace,
+                    why=(
+                        f"composite {top.id!r} expanded into "
+                        f"{[p.id for p in parts]} (Law E axis-factoring); "
+                        f"applicability={top_applicability:.3f}"
+                    ),
+                )
+            return SolverPlan(
+                solvers=(top,),
+                signature=signature,
+                source="single",
+                rank_trace=trace,
+                why=(
+                    f"single best {top.id!r}; applicability="
+                    f"{top_applicability:.3f}, horizon_cost="
+                    f"{horizon_cost(top, self.library)}"
+                ),
+            )
+
+        # 3. Nothing applies — try bounded LLM synthesis.
+        synthesized = self._synthesize(ctx, signature)
+        if synthesized is not None:
+            return SolverPlan(
+                solvers=(synthesized,),
+                signature=signature,
+                source="synthesized",
+                rank_trace=trace,
+                why=f"synthesized {synthesized.id!r} (no prior applied)",
+            )
+
+        # 4. NULL FALLBACK — highest-applicability prior solver (bounded; DP-20).
+        return self._null_fallback(ranked, signature, trace)
+
+    # -- internals --------------------------------------------------------- #
+
+    def _signature(self, ctx: SolverContext) -> StructuralSignature:
+        return signature_of(ctx.goal, ctx.world, self.assets)
+
+    def _rank_trace(
+        self, ranked: Tuple[Solver, ...], signature: StructuralSignature
+    ) -> Tuple[Tuple[str, float, int], ...]:
+        """The audit trail: ``(id, applicability, horizon_cost)`` per ranked solver.
+
+        The reported cost is the SAME RESOLVED :func:`horizon_cost` the ranking key
+        sorts by (passing ``self.library`` so a composite's ``max(parts)`` horizon
+        resolves), so the trace can never disagree with the actual order — a raw
+        map lookup would report the literal ``max(parts)`` as the unknown ceiling
+        while the sort used the derived part cost."""
+        return tuple(
+            (
+                s.id,
+                applicability(s, signature),
+                horizon_cost(s, self.library),
+            )
+            for s in ranked
+        )
+
+    @staticmethod
+    def _is_composite(solver: Solver) -> bool:
+        """A composite / Law E axis-factoring solver (category ``meta`` whose
+        horizon is ``max(parts)``)."""
+        return solver.verification_horizon.strip() == _HORIZON_MAX_PARTS
+
+    def _expand_parts(self, composite: Solver) -> Tuple[Solver, ...]:
+        """The composite's bound parts as ordered :class:`Solver`s (id-ascending,
+        unresolved ids dropped). Empty when no part resolves."""
+        parts = [self.library.by_id(pid) for pid in composite.parts]
+        resolved = [p for p in parts if p is not None]
+        return tuple(sorted(resolved, key=lambda s: s.id))
+
+    def _synthesize(
+        self, ctx: SolverContext, signature: StructuralSignature
+    ) -> Optional[Solver]:
+        """Bounded LLM synthesis: consult the generator up to
+        :data:`_MAX_SYNTHESIZE_ATTEMPTS` times for a usable proposed family; add
+        the first one to the library's synthesized layer and return it. ``None``
+        if every attempt declines / fails to parse (the classical fallback path).
+        Deterministic + bounded (DP-10): a fixed attempt cap, no RNG."""
+        briefing = self._briefing(signature)
+        for _ in range(_MAX_SYNTHESIZE_ATTEMPTS):
+            proposed = consult(
+                ctx.consult,
+                briefing,
+                _SYNTHESIZE_SCHEMA,
+                _parse_synthesized,
+            )
+            if proposed is not None:
+                return self.library.add_synthesized(proposed)
+        return None
+
+    @staticmethod
+    def _briefing(signature: StructuralSignature) -> str:
+        """The propose-only briefing for the synthesize seam (re-grounded each
+        call; no memory). Names the signature so the generator proposes a family
+        keyed to it."""
+        return (
+            "Propose ONE typed solver family for a goal/world with "
+            f"goal_kind={signature.goal_kind!r} and world structure "
+            f"{sorted(signature.world_keywords)}. Return id, backend "
+            "(SearchHeuristic|ConstrainedGenerator|Simulator), and algorithm."
+        )
+
+    def _null_fallback(
         self,
-        world: _Simulator,
-        situation: AbstractSituation,
-        roadmap: Roadmap,
-        moves: Sequence[GameMove],
-    ) -> GamePlan:
-        """Plan toward the current (first-unmet) Milestone of ``roadmap`` (see
-        :func:`plan_roadmap`)."""
-        return plan_roadmap(
-            world, situation, roadmap, moves,
-            horizon=self.horizon, max_expand=self.max_expand,
+        ranked: Tuple[Solver, ...],
+        signature: StructuralSignature,
+        trace: Tuple[Tuple[str, float, int], ...],
+    ) -> SolverPlan:
+        """The bounded DP-20 fallback: the highest-applicability prior solver
+        (the rank head, which is total-ordered even at applicability 0). Returns a
+        plan with an EMPTY ``solvers`` only if the library itself is empty (the
+        truly degenerate case) — otherwise always names a concrete solver."""
+        if not ranked:
+            return SolverPlan(
+                solvers=(),
+                signature=signature,
+                source="null-fallback",
+                rank_trace=trace,
+                why="empty library: no solver available (degenerate)",
+            )
+        head = ranked[0]
+        return SolverPlan(
+            solvers=(head,),
+            signature=signature,
+            source="null-fallback",
+            rank_trace=trace,
+            why=(
+                f"null-fallback to highest-applicability prior {head.id!r} "
+                f"(applicability={applicability(head, signature):.3f}); "
+                "no LLM backend / synthesis declined (DP-20 bounded plan)"
+            ),
         )
 
 
-# -------------------------------------------------------------- Milestone-roadmap ordering
-def plan_roadmap(
-    world: _Simulator,
-    situation: AbstractSituation,
-    roadmap: Roadmap,
-    moves: Sequence[GameMove],
-    horizon: int = DEFAULT_HORIZON,
-    max_expand: int = DEFAULT_MAX_EXPAND,
-) -> GamePlan:
-    """Roadmap-ordered planning (TS-19): plan toward the CURRENT Milestone's goal only.
+# --------------------------------------------------------------------------- #
+# ScoreCandidates (use case) — posterior accept/reject + confidence update.
+# --------------------------------------------------------------------------- #
 
-    The current milestone is ``roadmap.current(situation)`` -- the FIRST (in roadmap order)
-    whose goal does not yet hold. The planner aims at THAT step's goal, never a later one,
-    until its predecessor's goal holds; the overall target is ``roadmap.final_goal()``. This is
-    the固定実装 that enforces order (NOT an LLM -- the belief-agent thrash lesson): a later
-    milestone can only become the planned-toward goal once every predecessor is met, because
-    ``current`` advances strictly in order.
-
-    Returns the :class:`GamePlan` toward the current step (its ``aimed_at`` records WHICH goal
-    was targeted, for the TS-19 planned-toward-goal trace). When the whole roadmap is already
-    satisfied, returns the empty plan aimed at the final goal. An empty roadmap yields an empty
-    plan (no goal to pursue)."""
-    current = roadmap.current(situation)
-    if current is None:
-        # Every milestone is met -> roadmap complete; nothing left to plan.
-        return GamePlan(moves=(), goal_distance=0, aimed_at=roadmap.final_goal())
-    return plan(
-        world, situation, current.goal, moves,
-        horizon=horizon, max_expand=max_expand, aimed_at=current.goal,
-    )
-
-
-# =====================================================================================
-# Solver escalation / SolverLibrary cluster (CMP-14 Solver / CMP-15 SolverLibrary /
-# CMP-35 SelectSolver / CMP-36 ScoreCandidates / CMP-16 Conception). Built ON TOP of the
-# solver-core ``plan`` above (the base "navigate" Solver) -- it stays the byte-for-byte
-# look-ahead the play cluster imports; this layer DISPATCHES among Solvers, COMPOSES them by
-# axis (Law E), and -- when nothing baked fits -- has the built-in LLM GENERATE a small
-# program mid-game, registering it to the overlay. Every stage's candidate is scored by
-# OBSERVATION (ScoreCandidates) BEFORE adoption.
-#
-# Canon (cite, never duplicate):
-#   - _assets/gr-arc-3-terms.md
-#       TERM-13 BuiltInSimulator -- look-ahead + verify at ZERO scored moves (RHAE-0).
-#       TERM-17 EffectSignature  -- the per-axis effect key {event,target,attribute,operator,
-#                                   params_class}; ``attribute`` IS the independent axis
-#                                   (position / orientation / form / colour / count ...) Law E
-#                                   factors the goal along (attributes.effect_signature).
-#       TERM-22 proposer / TERM-23 Qwen -- the in-core LOCAL/OFFLINE LLM; proposes only, the
-#                                   master (ScoreCandidates) disposes (NFR-1).
-#   - _assets/gr-arc-3-domain-model.plan.md
-#       Solver := a typed GoalPredicate->GamePlan; {kind, applicability(structure->confidence,
-#         observation-updated), verification_horizon(=futility progress window, adaptive),
-#         parts(composite = Law E axis-factoring), impl(port)}. A noun «entity», SINGULAR.
-#       SolverLibrary := the catalog; base (LTM prior, read-only) + overlay (runtime,
-#         synthesized); SelectSolver ranks by applicability + synthesizes-when-stuck.
-#       Conception := the answer bundle (WorldModel + GoalPredicate + GamePlan + roadmap +
-#         provenance Solver), confidence-ranked.
-#   - _assets/gr-arc-3-sequence-solve-core.md (sheet 2): competing solvers scored by
-#     ScoreCandidates by OBSERVATION (no training answer exists in ARC-3); the Local LLM is
-#     "just another proposer" -- its typed output is scored EXACTLY like any candidate.
-#   - docs/memos/solver-management.md (design SSOT): structure -> ranked candidates ->
-#     cheap-first parallel -> observe-score -> sharpen; ``verification_horizon`` = the
-#     futility progress window; ``parts`` = axis-factoring (Law E).
-#   - 04-specification SC-14 / 02-requirements FR-C-11 (staged escalation; Law E axis
-#     decomposition; observation post-scoring) ; 05-test-strategy TS-14 ; NFR-1 (LLM offline).
-#
-# Hard rules honoured here:
-#   * RHAE-0 (NFR-3): the only dynamics call is ``world.predict`` -- 0 actions reach the env.
-#   * No game literals (NFR-6): a Solver keys on an axis NAME (a Dimension/attribute label) and
-#     opaque GameMove ids only -- never a colour number, coordinate, or glyph.
-#   * Determinism (DP-10): no RNG; no builtin ``hash()`` for identity (Solvers carry a stable
-#     ``kind``/axis string id; ranking ties break on (-, ascending id)); the stub generator the
-#     test injects is deterministic. The LLM is a PLUGGABLE Protocol -- the real one is the T3
-#     offline-risk and is never imported here.
-# =====================================================================================
-
-from typing import Dict, FrozenSet, Iterable  # (supplements the module-level typing import)
-
-
-# ----------------------------------------------------------------- structure signature
-# A Solver's ``applicability`` is a function of the STRUCTURE SIGNATURE (the partial Goal
-# logical-form x World transition-structure -- memos/solver-management.md). We model it as a
-# frozenset of axis NAMES the goal touches (e.g. {"position"}, {"colour", "position"}) plus an
-# optional ``kind`` tag, because the staged escalation keys on which independent axes the goal
-# decomposes into (Law E). It is game-literal-free: an axis name is a Dimension/attribute label
-# (the EffectSignature.attribute vocabulary), never a colour/coordinate.
-@dataclass(frozen=True)
-class StructureSignature:
-    """The dispatch key SelectSolver ranks Solvers against (CMP-35 input).
-
-    ``axes`` -- the independent attribute axes the (partial) goal touches, as a frozenset of
-    axis-name strings drawn from the EffectSignature.attribute vocabulary
-    (``position`` / ``orientation`` / ``form`` / ``colour`` / ``count`` / ``presence`` /
-    ``scalar``); these are the axes Law E factors the goal along. ``kind`` -- an optional
-    coarse transition-structure tag (e.g. ``"navigate"``). Frozen «value»: deterministic
-    equality from primitives only (DP-10)."""
-
-    axes: FrozenSet[str] = field(default_factory=frozenset)
-    kind: str = ""
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "axes", frozenset(str(a) for a in self.axes))
-
-    def with_axes(self, axes: Iterable[str]) -> "StructureSignature":
-        """A copy carrying ``axes`` (same kind) -- used when restricting to one axis (Law E)."""
-        return StructureSignature(axes=frozenset(str(a) for a in axes), kind=self.kind)
-
-
-# An applicability function: STRUCTURE SIGNATURE -> confidence in [0, 1] (a *function*, not a
-# static scalar -- memos/solver-management.md; observation-updated like InteractionRule.conf).
-Applicability = Callable[[StructureSignature], float]
-
-# The implementation of a Solver: it turns (world, situation, goal, moves) into a GamePlan.
-# The base navigate Solver's impl is the module-level ``plan``; a composite's impl composes its
-# parts; an LLM-generated Solver's impl runs the generated program. Kept as a port (memos:
-# ``impl`` = which port: SearchHeuristic / Simulator / ConstrainedGenerator).
-SolverImpl = Callable[["_Simulator", AbstractSituation, GoalPredicate, Sequence[GameMove]], GamePlan]
-
-
-# ------------------------------------------------------------------------------- Solver
-@dataclass(frozen=True)
-class Solver:
-    """A typed ``GoalPredicate -> GamePlan`` connector -- the morphism (CMP-14).
-
-    Attributes (domain-model.plan + memos/solver-management.md):
-      * ``kind``                 -- the solver family / a stable game-literal-free id
-                                    (search | order | modular | ... ; or "navigate" for the
-                                    base). Used as the deterministic identity + tie-break.
-      * ``applicability``        -- a FUNCTION ``StructureSignature -> confidence`` (not a static
-                                    scalar); the dispatch-ranking signal, observation-updatable
-                                    (see :meth:`reweight`).
-      * ``verification_horizon`` -- how many moves to invest to verify the hypothesis = the
-                                    futility progress window (G1/P1); adaptive. An RHAE
-                                    investment, so it doubles as the look-ahead bound here.
-      * ``parts``                -- sub-Solvers composed by axis-factoring (Law E); empty for a
-                                    leaf. A composite's :meth:`solve` chains its parts so each
-                                    independent axis is advanced (and observed) separately.
-      * ``impl``                 -- the port that produces the GamePlan (the base = module
-                                    ``plan``; a composite = :func:`_compose_parts`; an
-                                    LLM-generated one = the generated program). ``None`` for a
-                                    composite (its parts carry the impl).
-      * ``axis``                 -- for a per-axis leaf in a Law-E composite: the single axis
-                                    name this Solver is responsible for (so the test can assert
-                                    each axis got a DISTINCT Solver and its effect is observed
-                                    separately). Empty for a whole-goal Solver.
-      * ``origin``               -- provenance tag: ``"base"`` (LTM prior) / ``"composite"`` /
-                                    ``"llm"`` (overlay, just-generated). Lets ScoreCandidates /
-                                    the test trace where a candidate came from.
-
-    Frozen «value»-ish: identity is the (kind, axis, origin) triple via :meth:`solver_id`
-    (a stable string -- NEVER builtin ``hash()`` of the callables), so ranking is deterministic
-    (DP-10). The callables compare by identity, which is fine -- ordering never depends on them.
-    """
-
-    kind: str
-    applicability: Applicability = field(default=lambda _sig: 0.0)
-    verification_horizon: int = DEFAULT_HORIZON
-    parts: Tuple["Solver", ...] = ()
-    impl: Optional[SolverImpl] = None
-    axis: str = ""
-    origin: str = "base"
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "parts", tuple(self.parts))
-
-    def is_composite(self) -> bool:
-        """True iff this Solver composes sub-Solvers (a Law-E axis-factored solver)."""
-        return len(self.parts) > 0
-
-    def solver_id(self) -> str:
-        """A stable, process-independent identity string (DP-10): ``origin:kind[:axis]``.
-        Used as the ranking tie-break and the overlay de-dup key -- never builtin ``hash``."""
-        base = "%s:%s" % (self.origin, self.kind)
-        return ("%s:%s" % (base, self.axis)) if self.axis else base
-
-    def confidence(self, signature: StructureSignature) -> float:
-        """The applicability confidence for ``signature`` (the dispatch signal), clamped to
-        [0, 1]. A composite reports the MIN confidence across its parts (it is only as
-        applicable as its least-applicable axis), so a composite never out-ranks a leaf that
-        genuinely covers the whole goal unless every axis is covered."""
-        if self.is_composite():
-            return min((p.confidence(signature) for p in self.parts), default=0.0)
-        try:
-            c = float(self.applicability(signature))
-        except Exception:
-            return 0.0
-        return 0.0 if c < 0.0 else (1.0 if c > 1.0 else c)
-
-    def reweight(self, signature: StructureSignature, confidence: float) -> "Solver":
-        """Return a copy whose applicability is PINNED to ``confidence`` on ``signature``
-        (observation-update: ScoreCandidates raises/lowers a Solver's applicability after
-        seeing its effect). Deterministic; other signatures fall back to the old function."""
-        old = self.applicability
-        pinned = max(0.0, min(1.0, float(confidence)))
-        target = signature
-
-        def _updated(sig: StructureSignature) -> float:
-            if sig == target:
-                return pinned
-            return old(sig)
-
-        return Solver(
-            kind=self.kind, applicability=_updated,
-            verification_horizon=self.verification_horizon, parts=self.parts,
-            impl=self.impl, axis=self.axis, origin=self.origin,
-        )
-
-    def solve(
-        self,
-        world: "_Simulator",
-        situation: AbstractSituation,
-        goal: GoalPredicate,
-        moves: Sequence[GameMove],
-    ) -> GamePlan:
-        """Produce a :class:`GamePlan` for ``goal`` from ``situation`` (RHAE-0: only
-        ``world.predict`` is called). A composite chains its parts (each axis advanced in turn
-        = Law E); a leaf runs its ``impl`` (defaulting to the base navigate ``plan`` bounded by
-        ``verification_horizon``). Never sends an action to the environment."""
-        if self.is_composite():
-            return _compose_parts(self.parts, world, situation, goal, moves)
-        if self.impl is not None:
-            return self.impl(world, situation, goal, moves)
-        # Leaf with no explicit impl == the base navigate Solver: bounded look-ahead toward goal.
-        return plan(world, situation, goal, moves, horizon=self.verification_horizon)
-
-
-def restrict_goal_to_axis(goal: GoalPredicate, axis: str) -> GoalPredicate:
-    """Restrict an AND-of-axis-relations ``goal`` to the conjunction of ITS atoms that constrain
-    ``axis`` (the Law-E projection of the goal onto one independent axis). A relation NAME maps to
-    the axis it constrains via :data:`_RELATION_AXIS`. Returns the (sub-)GoalPredicate over only
-    that axis's atoms; falls back to the WHOLE ``goal`` when no atom matches (so a leaf never
-    plans toward a vacuous predicate). Instance-invariant (the kept atoms are role-keyed)."""
-    matching = []
-    for atom in goal.atoms():
-        rel_name = getattr(atom, "name", None)
-        axes = _RELATION_AXIS.get(rel_name, ("position",)) if rel_name is not None else ()
-        if axis in axes and isinstance(atom, Atom):
-            matching.append(atom)
-    if not matching:
-        return goal                               # nothing on this axis: plan the whole goal
-    if len(matching) == 1:
-        return matching[0]
-    return And(operands=tuple(matching))
-
-
-def _axis_leaf_impl(axis: str, horizon: int) -> SolverImpl:
-    """The impl of a per-axis leaf Solver: plan toward only ITS axis's projection of the goal
-    (:func:`restrict_goal_to_axis`), using only the moves that act on ITS axis (the registered
-    per-axis probe moves -- the interactions this Solver OWNS), bounded by ``horizon``. RHAE-0
-    (only ``world.predict``). A leaf therefore addresses exactly one independent axis through the
-    interactions it owns (the Law-E building block); a single such leaf cannot satisfy a
-    multi-axis goal alone -- it lacks the OTHER axes' moves -- which is the escalation cue (SC-14).
-
-    When the axis has NO registered probe moves, the leaf falls back to all available ``moves``
-    (a Solver with an unknown move repertoire plans over everything -- still game-literal-free)."""
-
-    def _impl(world: "_Simulator", situation: AbstractSituation, goal: GoalPredicate,
-              moves: Sequence[GameMove]) -> GamePlan:
-        axis_goal = restrict_goal_to_axis(goal, axis)
-        own = _AXIS_PROBE_MOVES.get(axis)
-        axis_moves = list(own) if own else list(moves)
-        return plan(world, situation, axis_goal, axis_moves, horizon=horizon, aimed_at=goal)
-
-    return _impl
-
-
-def navigate_solver(horizon: int = DEFAULT_HORIZON) -> Solver:
-    """The base "navigate" Solver (the existing ``plan``): addresses the single POSITION axis (the
-    reach/deliver family) -- the LTM prior every library ships with. Its applicability is high when
-    the goal touches the ``position`` axis and falls off as more axes appear, and its impl plans
-    toward ONLY the position projection of the goal: a single navigate cannot satisfy a multi-axis
-    goal alone -- that is what forces escalation (SC-14)."""
-
-    def _applies(sig: StructureSignature) -> float:
-        if "position" not in sig.axes:
-            return 0.0
-        # Full confidence for a pure-position goal; decays as other axes join (escalation cue).
-        return 1.0 / float(len(sig.axes))
-
-    return Solver(
-        kind="navigate",
-        applicability=_applies,
-        verification_horizon=horizon,
-        impl=_axis_leaf_impl("position", horizon),
-        axis="position",
-        origin="base",
-    )
-
-
-def axis_solver(axis: str, horizon: int = DEFAULT_HORIZON) -> Solver:
-    """A single-axis Solver responsible for ONE independent attribute ``axis`` (colour / shape /
-    position / orientation ...). It plans toward only the part of the goal on its axis
-    (:func:`restrict_goal_to_axis`) -- the building block a Law-E composite factors the goal into.
-    Applicability is full iff the goal is a SINGLE-axis goal on ITS axis, else 0: an axis Solver
-    is not a standalone candidate for a multi-axis goal (those route to a Law-E composite, which
-    pulls axis Solvers in by axis name). This keeps the stage-1 whole-goal ranking to whole-goal
-    Solvers (navigate); the axis leaves are the composite's building blocks."""
-
-    def _applies(sig: StructureSignature) -> float:
-        return 1.0 if sig.axes == frozenset({axis}) else 0.0
-
-    return Solver(
-        kind="axis-%s" % axis,
-        applicability=_applies,
-        verification_horizon=horizon,
-        impl=_axis_leaf_impl(axis, horizon),
-        axis=axis,
-        origin="base",
-    )
-
-
-def _compose_parts(
-    parts: Tuple[Solver, ...],
-    world: "_Simulator",
-    situation: AbstractSituation,
-    goal: GoalPredicate,
-    moves: Sequence[GameMove],
-) -> GamePlan:
-    """Run a Law-E composite: each part advances its OWN axis from the running situation, and the
-    per-axis move sub-sequences are concatenated in a deterministic (part) order. Each part plans
-    against the WHOLE goal but is bounded by its own horizon, so its contribution is the moves
-    that advance ITS axis; the running situation is rolled forward on the sim between parts (so
-    the axes are advanced -- and, by construction, OBSERVED -- separately). RHAE-0: only
-    ``world.predict`` is used. Returns the concatenated :class:`GamePlan` aimed at ``goal``."""
-    state = situation
-    out_moves: List[GameMove] = []
-    for part in parts:
-        sub = part.solve(world, state, goal, moves)
-        for mv in sub.moves:
-            out_moves.append(mv)
-            state = world.predict(state, mv)
-    return GamePlan(moves=tuple(out_moves), goal_distance=goal.distance(state), aimed_at=goal)
-
-
-# ------------------------------------------------------------------- per-axis observation
-@dataclass(frozen=True)
-class AxisEffect:
-    """The separately-observed effect of advancing ONE axis (Law E evidence, TS-14 (a)).
-
-    Records, for a single axis Solver, the move it committed and the MoveEffect that resulted
-    when classified against an axis-restricted goal-distance -- so the test can assert each
-    independent axis's effect is observed SEPARATELY (not lumped into one whole-goal delta).
-    ``axis`` is the attribute name; ``effect`` is a :class:`world_model.MoveEffect` label;
-    ``move`` is the opaque id committed (``None`` iff the axis-plan was empty)."""
-
-    axis: str
-    effect: str
-    move: Optional[GameMove] = None
-
-
-def observe_axis_effects(
-    composite: Solver,
-    world: "_Simulator",
-    situation: AbstractSituation,
-    axis_distance: Mapping[str, Heuristic],
-) -> Tuple[AxisEffect, ...]:
-    """Advance each axis-part of a Law-E ``composite`` ONE move and classify ITS effect with
-    THAT axis's own goal-distance (``axis_distance[axis]``) -- the per-axis separate observation
-    of SC-14 / TS-14. Returns one :class:`AxisEffect` per part, in part order.
-
-    For each part: plan its sub-plan from the running state, commit its first move (MPC), predict
-    the next state, and classify the move via ``classify_move_effect`` against the part's axis
-    distance (so the colour move is scored on the colour axis, the position move on the position
-    axis, etc. -- the effects are SEPARATE). RHAE-0 (only ``world.predict``); deterministic."""
-    state = situation
-    effects: List[AxisEffect] = []
-    for part in composite.parts:
-        axis = part.axis
-        dist = axis_distance.get(axis)
-        # Plan the sub-move against a throwaway goal whose distance IS the injected per-axis
-        # distance, so the classifier reads the SAME axis metric the caller asserts on. The
-        # candidate moves are this axis's registered probe moves (opaque ids, no game literal).
-        if dist is not None:
-            axis_goal: GoalPredicate = _AxisGoal(axis=axis, dist=dist)
-            sub = part.solve(world, state, axis_goal, _AXIS_PROBE_MOVES.get(axis, ()))
-        else:
-            sub = part.solve(world, state, _TRIVIAL_GOAL, ())
-        move = sub.first()
-        if move is None:
-            effects.append(AxisEffect(axis=axis, effect=MoveEffect.INVARIANT, move=None))
-            continue
-        nxt = world.predict(state, move)
-        effect = (classify_move_effect(state, nxt, dist) if dist is not None
-                  else MoveEffect.INVARIANT)
-        effects.append(AxisEffect(axis=axis, effect=effect, move=move))
-        state = nxt
-    return tuple(effects)
-
-
-# A per-axis probe-move table the composite-observation helper consults: which opaque GameMove
-# advances each axis. It is supplied by the caller through ``register_axis_probe`` (the test
-# wires its synthetic axis->move map); empty by default (game-literal-free -- ids are opaque).
-_AXIS_PROBE_MOVES: Dict[str, Tuple[GameMove, ...]] = {}
-
-
-def register_axis_probe(axis: str, moves: Iterable[GameMove]) -> None:
-    """Register the opaque GameMove ids that advance ``axis`` (used only by
-    :func:`observe_axis_effects` to pick a probing move per axis). Deterministic; ids are
-    opaque tokens (no game literal)."""
-    _AXIS_PROBE_MOVES[axis] = tuple(moves)
-
-
-class _AxisGoal(GoalPredicate):
-    """A minimal GoalPredicate wrapping an injected per-axis distance (used internally by
-    :func:`observe_axis_effects` so the planner/classifier reads exactly the caller's axis
-    metric). ``test`` holds iff that distance is 0; instance-invariant (no literal terms)."""
-
-    def __init__(self, axis: str, dist: Heuristic) -> None:
-        self._axis = str(axis)
-        self._dist = dist
-
-    def test(self, situation: AbstractSituation) -> bool:
-        return _as_int(self._dist(situation)) <= 0
-
-    def distance(self, situation: AbstractSituation):
-        return self._dist(situation)
-
-    def atoms(self) -> tuple:
-        return ()
-
-    def canonical(self) -> tuple:
-        return ("axisgoal", self._axis)
-
-    def describe(self) -> str:
-        return "axis:%s" % self._axis
-
-
-class _TrivialGoal(GoalPredicate):
-    """A constant-true GoalPredicate (distance 0): a safe fallback when no axis distance is
-    supplied, so :func:`observe_axis_effects` never crashes on a missing metric."""
-
-    def test(self, situation: AbstractSituation) -> bool:
-        return True
-
-    def distance(self, situation: AbstractSituation) -> int:
-        return 0
-
-    def atoms(self) -> tuple:
-        return ()
-
-    def canonical(self) -> tuple:
-        return ("trivial",)
-
-    def describe(self) -> str:
-        return "true"
-
-
-_TRIVIAL_GOAL = _TrivialGoal()
-
-
-def _as_int(value) -> int:
-    """Coerce a distance to int for a >0 / <=0 comparison (distances are int-like here)."""
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 1
-
-
-# ---------------------------------------------------------------------- ConstrainedGenerator
-class ConstrainedGenerator(Protocol):
-    """The pluggable, LOCAL/OFFLINE program generator port (the built-in LLM, NFR-1; CMP-35
-    crux). The agent's core consults it ONLY to PROPOSE a small program when nothing baked fits
-    (sequence sheet 2 "propose a NEW structure when stuck"); the proposal is then scored by
-    ScoreCandidates EXACTLY like any other candidate (the master disposes). It is a PROTOCOL so
-    the real Qwen+vLLM generator is injected at runtime and a DETERMINISTIC STUB is injected in
-    the test -- the real LLM is the T3 offline-risk and is NEVER imported here.
-
-    ``generate(signature, situation, goal, moves) -> SolverImpl`` returns the IMPL of a fresh
-    Solver: a callable ``(world, situation, goal, moves) -> GamePlan``. Implementations MUST be
-    offline and deterministic (NFR-1 / DP-10); they may read only the opaque ``moves`` and the
-    abstract situation/goal -- never the real environment, never a game literal."""
-
-    def generate(
-        self,
-        signature: StructureSignature,
-        situation: AbstractSituation,
-        goal: GoalPredicate,
-        moves: Sequence[GameMove],
-    ) -> SolverImpl: ...
-
-
-def llm_generated_solver(
-    generator: ConstrainedGenerator,
-    signature: StructureSignature,
-    situation: AbstractSituation,
-    goal: GoalPredicate,
-    moves: Sequence[GameMove],
-    horizon: int = DEFAULT_HORIZON,
-) -> Solver:
-    """Wrap a program from ``generator`` as a fresh overlay Solver (origin ``"llm"``; CMP-35
-    stage 3). The generator returns a :class:`SolverImpl`; we box it in a Solver with full
-    nominal applicability on ``signature`` (its REAL worth is decided by ScoreCandidates, not by
-    this prior). NFR-1: ``generator`` is local/offline by contract; nothing here goes online."""
-    impl = generator.generate(signature, situation, goal, moves)
-
-    def _applies(sig: StructureSignature) -> float:
-        return 1.0 if sig == signature else 0.5
-
-    return Solver(
-        kind="llm-generated",
-        applicability=_applies,
-        verification_horizon=horizon,
-        impl=impl,
-        axis="",
-        origin="llm",
-    )
-
-
-# ------------------------------------------------------------------------- SolverLibrary
-class SolverLibrary:
-    """The two-layer Solver catalog (CMP-15): ``base`` (LTM prior, read-only) + ``overlay``
-    (runtime, incl. just-generated). Parallels :class:`attributes.Lexicon` and
-    :class:`goal.GoalPatterns`. ``select`` ranks the applicable Solvers for a goal+situation by
-    applicability confidence (deterministic tie-break).
-
-    Determinism (DP-10): both layers are ordered lists kept in registration order; ``select``
-    sorts by (-confidence, ``solver_id``) -- a total, process-independent order, never builtin
-    ``hash``. ``add`` appends to ``overlay`` (de-duped on ``solver_id``) -- the in-ops synthesis
-    target. No game literal lives in a Solver key (NFR-6)."""
-
-    def __init__(self, base: Optional[Sequence[Solver]] = None) -> None:
-        self._base: List[Solver] = list(base) if base is not None else _default_base_solvers()
-        self._overlay: List[Solver] = []
-
-    # ---- layers ----
-    def base(self) -> Tuple[Solver, ...]:
-        """The read-only baked prior Solvers (LTM), in registration order."""
-        return tuple(self._base)
-
-    def overlay(self) -> Tuple[Solver, ...]:
-        """The runtime-synthesized Solvers (incl. just-generated), in registration order."""
-        return tuple(self._overlay)
-
-    def all_solvers(self) -> Tuple[Solver, ...]:
-        """Base then overlay (the full catalog), in a deterministic order."""
-        return tuple(self._base) + tuple(self._overlay)
-
-    def add(self, solver: Solver) -> Solver:
-        """Register a synthesized ``solver`` into the OVERLAY (e.g. the LLM-generated program --
-        sequence sheet 2 S2). De-duped on ``solver_id`` (a re-add updates in place). Base is
-        never mutated (read-only LTM). Returns the registered Solver."""
-        sid = solver.solver_id()
-        for i, existing in enumerate(self._overlay):
-            if existing.solver_id() == sid:
-                self._overlay[i] = solver
-                return solver
-        self._overlay.append(solver)
-        return solver
-
-    def reweight(self, solver: Solver, signature: StructureSignature, confidence: float) -> Solver:
-        """Observation-update a Solver's applicability (overlay only; base stays read-only). The
-        reweighted twin is registered to the overlay, shadowing a base Solver of the same id
-        without mutating the read-only base. ``add`` de-dupes on ``solver_id``. Returns it."""
-        return self.add(solver.reweight(signature, confidence))
-
-    # ---- selection ----
-    def select(
-        self,
-        goal: GoalPredicate,
-        situation: AbstractSituation,
-        signature: Optional[StructureSignature] = None,
-    ) -> Tuple[Solver, ...]:
-        """Return the applicable Solvers RANKED by applicability confidence for this goal +
-        situation (CMP-35 step 1). ``signature`` defaults to one derived from the goal via
-        :func:`signature_of` (the axes the goal touches). Only Solvers with positive confidence
-        are returned; ties break on ``solver_id`` (ascending) for a total, deterministic order
-        (DP-10). The highest-ranked single Solver is the stage-1 candidate."""
-        sig = signature if signature is not None else signature_of(goal, situation)
-        scored = [(s.confidence(sig), s) for s in self.all_solvers()]
-        applicable = [(c, s) for c, s in scored if c > 0.0]
-        applicable.sort(key=lambda cs: (-cs[0], cs[1].solver_id()))
-        return tuple(s for _c, s in applicable)
-
-
-def _default_base_solvers() -> List[Solver]:
-    """The shipped base catalog (LTM prior, read-only): the navigate Solver plus one per
-    foundational independent axis (colour / shape / position / orientation), so the library can
-    factor a multi-axis goal by Law E. A generalisation prior, NOT learned; no game literal."""
-    return [
-        navigate_solver(),
-        axis_solver("colour"),
-        axis_solver("shape"),
-        axis_solver("position"),
-        axis_solver("orientation"),
-    ]
-
-
-# ---------------------------------------------------------------- structure signature derive
-# The foundational independent axes Law E factors a goal along (the EffectSignature.attribute
-# vocabulary, TERM-17). These are axis NAMES (Dimension labels), not game literals.
-FOUNDATIONAL_AXES: Tuple[str, ...] = ("colour", "shape", "position", "orientation")
-
-
-def signature_of(goal: GoalPredicate, situation: AbstractSituation) -> StructureSignature:
-    """Derive the :class:`StructureSignature` of a (partial) goal: the set of independent axes it
-    touches. The axes come from the goal's relation atoms -- a relation NAME maps to the axis it
-    constrains via :data:`_RELATION_AXIS` (e.g. ``inside``/``overlaps`` -> position;
-    ``matches`` -> the match axes). Unknown relation names fall back to ``position`` (the default
-    navigation axis). Game-literal-free: only relation NAMES (words) and axis labels are read."""
-    axes: set = set()
-    for atom in goal.atoms():
-        name = atom.terms[0] if atom.terms and isinstance(atom.terms[0], str) else None
-        rel_name = getattr(atom, "name", None) or name
-        for ax in _RELATION_AXIS.get(rel_name, ("position",)):
-            axes.add(ax)
-    if not axes:
-        axes.add("position")
-    return StructureSignature(axes=frozenset(axes), kind="navigate")
-
-
-# Which independent axes a relation NAME constrains (memos: Law E factors by axis). A "matches"
-# goal constrains the surface axes (colour + shape + orientation); a spatial relation constrains
-# position. These are structural axis labels, never game literals.
-_RELATION_AXIS: Dict[str, Tuple[str, ...]] = {
-    "inside": ("position",),
-    "overlaps": ("position",),
-    "adjacent": ("position",),
-    "matches": ("colour", "shape", "orientation"),
-    "same-colour": ("colour",),
-    "same-shape": ("shape",),
-    "same-orientation": ("orientation",),
-}
-
-
-# ------------------------------------------------------------------------- ScoreCandidates
 @dataclass(frozen=True)
 class CandidateScore:
-    """The observation post-score of one candidate Solver (CMP-36 output).
+    """One candidate solver's running posterior — a «value».
 
-    ``solver`` -- the scored Solver. ``plan`` -- the :class:`GamePlan` it produced (carried so
-    the adopted Conception holds the exact scored plan -- no re-derivation needed). ``effect`` --
-    the :class:`world_model.MoveEffect` of that plan's first move, classified by OBSERVATION
-    against the goal-distance (the same signal DetectFutility reads). ``progressed`` -- True iff
-    that effect is PROGRESS (goal-distance decreased): only a progressed candidate is adopted.
-    ``delta`` -- the goal-distance BEFORE minus AFTER (>0 iff it advanced); the ranking key among
-    positive candidates. ``adopted`` -- the post-scoring adoption verdict (== ``progressed``).
-    Frozen «value» (DP-10)."""
+    The same shape as ``InteractionRule.confidence`` / ``affordance_evidence``
+    running fractions: ``confidence`` = ``accepts / trials`` (an exact integer
+    fraction; 0.0 with no trials = no evidence). ``accepts`` / ``trials`` are the
+    deterministic running counts (NO RNG, NO builtin ``hash()``). Frozen — an
+    update returns a NEW score (immutability keeps the history honest)."""
 
-    solver: Solver
-    plan: GamePlan
-    effect: str
-    progressed: bool
-    delta: int = 0
-    adopted: bool = False
+    solver_id: str
+    accepts: int = 0
+    trials: int = 0
+
+    @property
+    def confidence(self) -> float:
+        """The posterior in [0, 1]: ``accepts / trials`` (0.0 if no trials)."""
+        return self.accepts / self.trials if self.trials > 0 else 0.0
+
+    def updated(self, accepted: bool) -> "CandidateScore":
+        """A NEW score with this trial folded in (``accepts`` += accepted,
+        ``trials`` += 1). Deterministic running-fraction update."""
+        return replace(
+            self,
+            accepts=self.accepts + (1 if accepted else 0),
+            trials=self.trials + 1,
+        )
 
 
+@dataclass
 class ScoreCandidates:
-    """Observation post-scoring of candidate Solvers (CMP-36; sequence sheet 2 ScoreCandidates).
+    """Anytime parallel posterior scoring of candidate solvers (domain v031
+    ``ScoreCandidates`` use case; FR-C-11 / FR-S-9).
 
-    ``score`` runs each candidate's plan on the built-in sim, commits its first move (MPC), and
-    classifies the OBSERVED effect via ``classify_move_effect(before, after, goal.distance)`` --
-    the SAME observation machinery that drives DetectFutility (sheet 2 C3 connection). A
-    candidate is ADOPTED only iff its effect is PROGRESS (it advanced the goal). The LLM-generated
-    candidate goes through the IDENTICAL scoring -- it is NOT adopted unscored (TS-14 (b)).
+    Runs the SelectSolver candidates in parallel and posterior-scores each against
+    observation: a candidate whose predicted progress materialised is ACCEPTED
+    (confidence up), one that diverged is REJECTED (confidence down). The update
+    is the deterministic running fraction (``accepts / trials``) — the SAME shape
+    as ``InteractionRule.confidence`` / ``affordance_evidence`` (NO RNG, NO
+    builtin ``hash()``; DP-10). Pairs with :class:`SelectSolver` to form the
+    solver-operation loop (select -> score -> reselect on divergence).
 
-    RHAE-0 (NFR-3): only ``world.predict`` is called; 0 actions reach the env (the sim does not
-    score, API-03). Determinism (DP-10): candidates are scored in the given order; the adopted
-    set is filtered by the PROGRESS predicate; ranking ties break on ``solver_id``. No game
-    literal is read (the score is a goal-distance delta over the abstract AbstractSituation)."""
+    Holds ``scores : solver_id -> CandidateScore`` (deterministic id-keyed).
+    :meth:`best` returns the highest-confidence candidate, id-ascending tie-break."""
 
-    def score_one(
-        self,
-        solver: Solver,
-        world: "_Simulator",
-        situation: AbstractSituation,
-        goal: GoalPredicate,
-        moves: Sequence[GameMove],
-    ) -> CandidateScore:
-        """Score a SINGLE candidate by observation: plan it, commit one move, classify the
-        effect, and decide adoption (PROGRESS => adopted). An empty plan (or a move the sim
-        leaves inert) scores as non-progress and is NOT adopted."""
-        game_plan = solver.solve(world, situation, goal, moves)
-        move = game_plan.first()
-        if move is None:
-            return CandidateScore(solver=solver, plan=game_plan, effect=MoveEffect.INVARIANT,
-                                  progressed=False, delta=0, adopted=False)
-        after = world.predict(situation, move)
-        effect = classify_move_effect(situation, after, goal.distance)
-        before_d = _as_int(goal.distance(situation))
-        after_d = _as_int(goal.distance(after))
-        delta = before_d - after_d
-        progressed = (effect == MoveEffect.PROGRESS)
-        return CandidateScore(solver=solver, plan=game_plan, effect=effect,
-                              progressed=progressed, delta=delta, adopted=progressed)
+    scores: Dict[str, CandidateScore] = field(default_factory=dict)
 
-    def score(
-        self,
-        candidates: Sequence[Solver],
-        world: "_Simulator",
-        situation: AbstractSituation,
-        goal: GoalPredicate,
-        moves: Sequence[GameMove],
-    ) -> Tuple[CandidateScore, ...]:
-        """Score every candidate by observation (in order). Returns one :class:`CandidateScore`
-        each; the caller adopts the scored-positive ones. The LLM candidate is just another
-        entry here -- scored identically (TS-14 (b))."""
-        return tuple(
-            self.score_one(s, world, situation, goal, moves) for s in candidates
-        )
+    def observe(self, solver_id: str, accepted: bool) -> CandidateScore:
+        """Fold one observation for ``solver_id`` (accept = predicted progress
+        materialised; reject = diverged) and return its updated score. Creates the
+        score on first observation. Deterministic running-fraction update."""
+        current = self.scores.get(solver_id, CandidateScore(solver_id=solver_id))
+        updated = current.updated(accepted)
+        self.scores[solver_id] = updated
+        return updated
 
-    def best_adopted(
-        self,
-        candidates: Sequence[Solver],
-        world: "_Simulator",
-        situation: AbstractSituation,
-        goal: GoalPredicate,
-        moves: Sequence[GameMove],
-    ) -> Optional[CandidateScore]:
-        """The single best ADOPTED candidate (highest goal-distance ``delta``, ties on
-        ``solver_id``), or ``None`` if NONE progressed (nothing scored-positive => adopt nothing,
-        and the caller escalates to the next stage)."""
-        adopted = [cs for cs in self.score(candidates, world, situation, goal, moves)
-                   if cs.adopted]
-        if not adopted:
+    def confidence(self, solver_id: str) -> float:
+        """The posterior confidence of ``solver_id`` (0.0 if never observed)."""
+        score = self.scores.get(solver_id)
+        return score.confidence if score is not None else 0.0
+
+    def accept(self, solver_id: str, *, threshold: float = 0.5) -> bool:
+        """The accept/reject verdict: confidence >= ``threshold`` AND at least one
+        trial (an unobserved candidate is not accepted — no evidence)."""
+        score = self.scores.get(solver_id)
+        return score is not None and score.trials > 0 and score.confidence >= threshold
+
+    def best(self) -> Optional[CandidateScore]:
+        """The highest-confidence observed candidate (id-ascending tie-break), or
+        ``None`` if nothing has been observed. Deterministic total order."""
+        if not self.scores:
             return None
-        adopted.sort(key=lambda cs: (-cs.delta, cs.solver.solver_id()))
-        return adopted[0]
-
-
-# ------------------------------------------------------------------------- Conception
-@dataclass(frozen=True)
-class Conception:
-    """The answer bundle (CMP-16): the selected/composed solution for the current turn.
-
-    Binds the chosen :class:`Solver` (provenance -- which solver produced the plan), the
-    :class:`GamePlan` it produced, the :class:`GoalPredicate` it aimed at, and the observation
-    ``score`` that justified adoption, plus the escalation ``stage`` that yielded it
-    (``"single"`` / ``"composite"`` / ``"llm"``). ``confidence`` ranks competing answers (the
-    adopted score's goal-distance delta, clamped) -- distinct from the game score. Frozen «value»
-    (DP-10): equality from the (stage, solver_id, plan) content, no builtin ``hash`` of mutable
-    state."""
-
-    solver: Solver
-    plan: GamePlan
-    goal: GoalPredicate
-    stage: str = "single"
-    score: Optional[CandidateScore] = None
-    confidence: float = 0.0
-
-    def solver_id(self) -> str:
-        """The provenance Solver's stable id (DP-10)."""
-        return self.solver.solver_id()
-
-    def is_empty(self) -> bool:
-        """True iff the bundled plan commits no move."""
-        return self.plan.is_empty()
-
-
-# ------------------------------------------------------------------------- SelectSolver
-# The three escalation stages (CMP-35; SC-14). Stable string labels for deterministic logging.
-STAGE_SINGLE: str = "single"
-STAGE_COMPOSITE: str = "composite"
-STAGE_LLM: str = "llm"
-
-# A record of one attempted stage (for the test/trace): the stage label, the candidate Solvers it
-# offered, the scores ScoreCandidates produced, and whether it was adopted. Lets TS-14 assert the
-# ORDER of stages AND that each stage's candidate passed scoring before adoption.
-@dataclass(frozen=True)
-class StageAttempt:
-    """One escalation stage's record (CMP-35 trace): ``stage`` label, the ``candidates`` offered,
-    the ``scores`` from ScoreCandidates, the ``adopted`` CandidateScore (``None`` if the stage
-    failed scoring and escalation continued), and -- for the composite stage -- the per-axis
-    ``axis_effects`` (Law E: each independent axis's effect observed SEPARATELY). Frozen «value»
-    (DP-10)."""
-
-    stage: str
-    candidates: Tuple[Solver, ...]
-    scores: Tuple[CandidateScore, ...]
-    adopted: Optional[CandidateScore] = None
-    axis_effects: Tuple[AxisEffect, ...] = ()
-
-    def passed_scoring(self) -> bool:
-        """True iff this stage adopted a candidate via observation scoring (its effect was
-        PROGRESS). A stage NEVER adopts unscored -- ``adopted`` is always one of ``scores``."""
-        return self.adopted is not None and self.adopted.adopted
-
-
-@dataclass(frozen=True)
-class Escalation:
-    """The full staged-escalation result (CMP-35 output; the TS-14 oracle bundle).
-
-    ``conception`` -- the adopted answer (``None`` iff every stage failed scoring). ``attempts``
-    -- the ordered :class:`StageAttempt`s, so the test can assert the stages ran in the order
-    single -> composite -> llm AND that the adopted candidate at each reached-stage passed
-    ScoreCandidates' observation scoring BEFORE adoption (an unscored candidate is never adopted).
-    Frozen «value» (DP-10)."""
-
-    conception: Optional[Conception]
-    attempts: Tuple[StageAttempt, ...]
-
-    def stages(self) -> Tuple[str, ...]:
-        """The stage labels in the order they were attempted (single[, composite[, llm]])."""
-        return tuple(a.stage for a in self.attempts)
-
-    def adopted_stage(self) -> Optional[str]:
-        """The stage whose candidate was adopted (``None`` iff none adopted)."""
-        return self.conception.stage if self.conception is not None else None
-
-
-class SelectSolver:
-    """Staged solver escalation with observation post-scoring (CMP-35; SC-14 / FR-C-11).
-
-    :meth:`escalate` runs, IN ORDER, until a stage's candidate is ADOPTED by ScoreCandidates:
-      1. **single**    -- the highest-ranked single baked Solver
-                          (``library.select(goal, situation)[0]``);
-      2. **composite** -- a Law-E axis-factored composite: each independent axis of the goal
-                          (``signature.axes``) routes to its OWN axis Solver, composed via
-                          ``parts``; the per-axis effects are observed SEPARATELY
-                          (:func:`observe_axis_effects`);
-      3. **llm**       -- the built-in LOCAL/OFFLINE generator proposes a small program, which
-                          is registered to ``library.overlay`` and then scored.
-
-    CRITICAL (TS-14 (b)): EVERY stage's candidate passes through :class:`ScoreCandidates`'
-    observation scoring BEFORE adoption -- including the LLM-generated one (scored identically;
-    NOT adopted unscored). A stage that scores no progress is recorded and escalation continues.
-
-    RHAE-0 (NFR-3): only ``world.predict`` is used. NFR-1: the generator is local/offline by the
-    :class:`ConstrainedGenerator` contract. Determinism (DP-10): stages and candidates run in a
-    fixed order; adoption is the PROGRESS predicate; no RNG; no builtin ``hash`` for identity.
-    """
-
-    def __init__(
-        self,
-        library: SolverLibrary,
-        scorer: Optional[ScoreCandidates] = None,
-        generator: Optional[ConstrainedGenerator] = None,
-    ) -> None:
-        self.library = library
-        self.scorer = scorer if scorer is not None else ScoreCandidates()
-        self.generator = generator
-
-    def escalate(
-        self,
-        world: "_Simulator",
-        situation: AbstractSituation,
-        goal: GoalPredicate,
-        moves: Sequence[GameMove],
-        axis_distance: Optional[Mapping[str, Heuristic]] = None,
-    ) -> Escalation:
-        """Run the staged escalation and return the :class:`Escalation` (adopted Conception +
-        the ordered stage attempts). ``axis_distance`` optionally injects a per-axis goal
-        distance so the composite stage can observe each axis's effect SEPARATELY (Law E); when
-        omitted, the composite is still built and scored on the whole-goal distance.
-
-        Stops at the FIRST stage whose candidate ScoreCandidates adopts (PROGRESS). If no stage
-        progresses, ``conception`` is ``None`` and every attempted stage is recorded."""
-        sig = signature_of(goal, situation)
-        attempts: List[StageAttempt] = []
-
-        # -------- stage 1: single baked Solver --------
-        ranked = self.library.select(goal, situation, sig)
-        single_candidates: Tuple[Solver, ...] = (ranked[0],) if ranked else ()
-        attempt1 = self._score_stage(STAGE_SINGLE, single_candidates, world, situation, goal, moves)
-        attempts.append(attempt1)
-        if attempt1.passed_scoring():
-            return self._finish(attempt1, attempts, goal)
-
-        # -------- stage 2: composite via axis decomposition (Law E) --------
-        composite = self._build_composite(sig)
-        composite_candidates: Tuple[Solver, ...] = (composite,) if composite is not None else ()
-        # Per-axis SEPARATE observation (Law E evidence) for the caller/test to assert on.
-        axis_effects: Tuple[AxisEffect, ...] = ()
-        if composite is not None and axis_distance is not None:
-            axis_effects = observe_axis_effects(composite, world, situation, axis_distance)
-        attempt2 = self._score_stage(STAGE_COMPOSITE, composite_candidates, world, situation,
-                                     goal, moves, axis_effects=axis_effects)
-        attempts.append(attempt2)
-        if attempt2.passed_scoring():
-            return self._finish(attempt2, attempts, goal)
-
-        # -------- stage 3: built-in LLM generates a program, registered to overlay --------
-        if self.generator is not None:
-            llm = llm_generated_solver(self.generator, sig, situation, goal, moves)
-            self.library.add(llm)                       # register to overlay (just-generated)
-            attempt3 = self._score_stage(STAGE_LLM, (llm,), world, situation, goal, moves)
-            attempts.append(attempt3)
-            if attempt3.passed_scoring():
-                return self._finish(attempt3, attempts, goal)
-
-        return Escalation(conception=None, attempts=tuple(attempts))
-
-    # ---- stage scoring (the SAME observation scoring for every stage, incl. LLM) ----
-    def _score_stage(
-        self,
-        stage: str,
-        candidates: Tuple[Solver, ...],
-        world: "_Simulator",
-        situation: AbstractSituation,
-        goal: GoalPredicate,
-        moves: Sequence[GameMove],
-        axis_effects: Tuple[AxisEffect, ...] = (),
-    ) -> StageAttempt:
-        """Score ``candidates`` by observation and build the :class:`StageAttempt`. Adoption is
-        ONLY via the score (PROGRESS) -- a candidate is never adopted unscored (TS-14 (b))."""
-        scores = self.scorer.score(candidates, world, situation, goal, moves)
-        adopted = None
-        positives = [cs for cs in scores if cs.adopted]
-        if positives:
-            positives.sort(key=lambda cs: (-cs.delta, cs.solver.solver_id()))
-            adopted = positives[0]
-        return StageAttempt(stage=stage, candidates=candidates, scores=scores,
-                            adopted=adopted, axis_effects=axis_effects)
-
-    def _finish(self, attempt: StageAttempt, attempts: List[StageAttempt],
-                goal: GoalPredicate) -> Escalation:
-        """Build the adopted :class:`Conception` from a passing ``attempt`` and close out. The
-        bundled plan is the EXACT one ScoreCandidates already produced (carried on the score), so
-        no re-derivation is needed; ``confidence`` is the adopted goal-distance delta (clamped)."""
-        cs = attempt.adopted
-        conception = Conception(
-            solver=cs.solver,
-            plan=cs.plan,
-            goal=goal,
-            stage=attempt.stage,
-            score=cs,
-            confidence=max(0.0, min(1.0, float(cs.delta))),
-        )
-        return Escalation(conception=conception, attempts=tuple(attempts))
-
-    # ---- composite construction (Law E) ----
-    def _build_composite(self, signature: StructureSignature) -> Optional[Solver]:
-        """Build a Law-E composite Solver: ONE distinct axis Solver per independent axis in
-        ``signature.axes`` (each axis gets its own Solver -- the SC-14 decomposition), composed
-        via ``parts``. Returns ``None`` if the goal has fewer than 2 axes (nothing to compose --
-        a single Solver already covers it). The axis Solvers are drawn from the library's base
-        (each ``axis-<name>``); a missing one is built on the fly."""
-        axes = sorted(signature.axes)              # deterministic axis order (DP-10)
-        if len(axes) < 2:
-            return None
-        by_axis = {s.axis: s for s in self.library.all_solvers() if s.axis}
-        parts: List[Solver] = []
-        for ax in axes:
-            parts.append(by_axis.get(ax) or axis_solver(ax))
-        return Solver(
-            kind="composite",
-            applicability=lambda _sig: 1.0,
-            parts=tuple(parts),
-            axis="",
-            origin="composite",
-        )
+        return sorted(
+            self.scores.values(),
+            key=lambda s: (-s.confidence, s.solver_id),
+        )[0]

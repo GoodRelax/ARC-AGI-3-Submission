@@ -1,0 +1,39 @@
+category	id	operator	operands	description	remark
+taxonomy	tax_color_black	subset	color; black	color is black を包含	builtin taxonomy; color value = ARC palette index 0..15 (English names, index-ordered)
+taxonomy	tax_color_blue	subset	color; blue	color is blue を包含	builtin taxonomy; color value = ARC palette index 0..15 (English names, index-ordered)
+taxonomy	tax_color_red	subset	color; red	color is red を包含	builtin taxonomy; color value = ARC palette index 0..15 (English names, index-ordered)
+taxonomy	tax_color_green	subset	color; green	color is green を包含	builtin taxonomy; color value = ARC palette index 0..15 (English names, index-ordered)
+taxonomy	tax_color_yellow	subset	color; yellow	color is yellow を包含	builtin taxonomy; color value = ARC palette index 0..15 (English names, index-ordered)
+taxonomy	tax_color_grey	subset	color; grey	color is grey を包含	builtin taxonomy; color value = ARC palette index 0..15 (English names, index-ordered)
+taxonomy	tax_color_magenta	subset	color; magenta	color is magenta を包含	builtin taxonomy; color value = ARC palette index 0..15 (English names, index-ordered)
+taxonomy	tax_color_orange	subset	color; orange	color is orange を包含	builtin taxonomy; color value = ARC palette index 0..15 (English names, index-ordered)
+taxonomy	tax_color_cyan	subset	color; cyan	color is cyan を包含	builtin taxonomy; color value = ARC palette index 0..15 (English names, index-ordered)
+taxonomy	tax_color_maroon	subset	color; maroon	color is maroon を包含	builtin taxonomy; color value = ARC palette index 0..15 (English names, index-ordered)
+taxonomy	tax_color_pink	subset	color; pink	color is pink を包含	builtin taxonomy; color value = ARC palette index 0..15 (English names, index-ordered)
+taxonomy	tax_color_lime	subset	color; lime	color is lime を包含	builtin taxonomy; color value = ARC palette index 0..15 (English names, index-ordered)
+taxonomy	tax_color_teal	subset	color; teal	color is teal を包含	builtin taxonomy; color value = ARC palette index 0..15 (English names, index-ordered)
+taxonomy	tax_color_purple	subset	color; purple	color is purple を包含	builtin taxonomy; color value = ARC palette index 0..15 (English names, index-ordered)
+taxonomy	tax_color_brown	subset	color; brown	color is brown を包含	builtin taxonomy; color value = ARC palette index 0..15 (English names, index-ordered)
+taxonomy	tax_color_white	subset	color; white	color is white を包含	builtin taxonomy; color value = ARC palette index 0..15 (English names, index-ordered)
+taxonomy	tax_shape_dot	subset	shape; dot	shape is dot を包含	builtin taxonomy
+taxonomy	tax_shape_bar	subset	shape; bar	shape is bar を包含	builtin taxonomy
+taxonomy	tax_shape_box	subset	shape; box	shape is box を包含	builtin taxonomy
+taxonomy	tax_shape_rect	subset	shape; rect	shape is rect を包含	builtin taxonomy
+taxonomy	tax_shape_cross	subset	shape; cross	shape is cross を包含	builtin taxonomy
+taxonomy	tax_shape_ell	subset	shape; ell	shape is ell を包含	builtin taxonomy
+taxonomy	tax_shape_tee	subset	shape; tee	shape is tee を包含	builtin taxonomy
+taxonomy	tax_shape_ring	subset	shape; ring	shape is ring を包含	builtin taxonomy
+taxonomy	tax_shape_blob	subset	shape; blob	shape is blob を包含	builtin taxonomy
+taxonomy	tax_behavior_controllable	subset	behavior; controllable	behavior is controllable を包含	builtin taxonomy
+taxonomy	tax_behavior_autonomous	subset	behavior; autonomous	behavior is autonomous を包含	builtin taxonomy
+taxonomy	tax_behavior_movable	subset	behavior; movable	behavior is movable を包含	builtin taxonomy
+taxonomy	tax_behavior_vanishing	subset	behavior; vanishing	behavior is vanishing を包含	builtin taxonomy
+taxonomy	tax_behavior_spawning	subset	behavior; spawning	behavior is spawning を包含	builtin taxonomy
+taxonomy	tax_behavior_recolorable	subset	behavior; recolorable	behavior is recolorable を包含	builtin taxonomy
+taxonomy	same_color	samekind	black; blue; red; green; yellow; grey; magenta; orange; cyan; maroon; pink; lime; teal; purple; brown; white	color values are peers (same axis)	builtin taxonomy
+taxonomy	same_shape	samekind	dot; bar; box; rect; cross; ell; tee; ring; blob	shape bases are peers (same axis)	builtin taxonomy
+taxonomy	same_behavior	samekind	controllable; autonomous; movable; vanishing; spawning; recolorable; clickable; gauge; blocking; lethal	behavior modifiers are peers (same axis)	builtin taxonomy
+taxonomy	tax_behavior_clickable	subset	behavior; clickable	behavior is clickable を包含	Mirrors the shipped tax_behavior_* subset rows. operands = [behavior axis Word, clickable Word]; subset operator already in words.tsv (op-less rel? no: builtin operator Word). LOADS clean once words.tsv (clickable) is present. CONFIDENCE high.
+taxonomy	tax_behavior_gauge	subset	behavior; gauge	behavior is gauge を包含	Mirrors shipped tax_behavior_* rows. LOADS clean with words.tsv (gauge). CONFIDENCE medium-high.
+taxonomy	tax_behavior_blocking	subset	behavior; blocking	behavior is blocking を包含	Mirrors shipped tax_behavior_* rows. LOADS clean with words.tsv (blocking). CONFIDENCE medium.
+taxonomy	tax_behavior_lethal	subset	behavior; lethal	behavior is lethal を包含	Mirrors the shipped tax_behavior_* subset rows. operands = [behavior axis Word, lethal Word]; subset operator builtin. LOADS clean once words.tsv (lethal) is present. CONFIDENCE medium-high.

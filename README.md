@@ -39,15 +39,26 @@ notebook is generated from our `agent/` package in two steps:
    |------|---------|
    | 1 markdown | header |
    | 2 code | `pip install --no-index … arc-agi` — offline game engine |
+   | 2b code (LLM build only) | offline `pip install --no-index transformers==4.44.2 lm-format-enforcer==0.10.9` from the auto-discovered wheels dataset (graceful no-op if absent) |
    | 3 code | `%%writefile /tmp/my_agent.py` + our self-extracting `my_agent.py` (~260 KB = the entire agent) |
-   | 4 code | competition rerun: wait for the gateway, register `MyAgent`, run `main.py --agent myagent` |
+   | 4 code | competition rerun: wait for the gateway, register `MyAgent`, run `main.py --agent myagent` (with `ARC_LLM=1` + `ARC_LLM_MODEL=<mount>` when the LLM build is enabled) |
    | 5 code | commit mode only: write a dummy `submission.parquet` |
 
-   The accelerator is the `ACCELERATOR` constant in `build_notebook.py` (currently
-   `cpu` — classical search, no GPU).
+   The accelerator is the `ACCELERATOR` constant in `build_notebook.py`; the LLM
+   move-proposer is the `ENABLE_LLM` constant (currently `t4` + `ENABLE_LLM=True`).
 
 Run-time deps: `numpy` / `scipy` / `scikit-image` (already in Kaggle's base image);
-`arc-agi` from the offline wheel installed in cell 2. No extra wheels dataset needed.
+`arc-agi` from the offline wheel installed in cell 2. When `ENABLE_LLM=True` the
+notebook also installs `transformers==4.44.2` + `lm-format-enforcer==0.10.9`
+OFFLINE from the `goodrelax/arc-agi3-llm-wheels` dataset (cell 2b), and mounts the
+Qwen 2.5 1.5B model via `model_sources`. The transformers downgrade (the Kaggle
+image ships 5.0.0, which breaks `lm-format-enforcer`) must run before the agent
+lazily imports transformers; if the wheels dataset is detached the agent degrades
+to classical search (it never crashes). For the **classical build**: set
+`ACCELERATOR="cpu"` and `ENABLE_LLM=False` in `build_notebook.py` (this drops the
+LLM cell and clears `dataset_sources` automatically), then remove the Qwen entry
+from `model_sources` in `notebooks/kernel-metadata.json`, and re-run the two
+build scripts.
 
 ## Rebuild & submit (Windows — no `make`)
 The `Makefile` assumes a Unix venv layout, so on Windows run the scripts directly:

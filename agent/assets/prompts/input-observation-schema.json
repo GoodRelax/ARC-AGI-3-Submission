@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "arc-agi-3/llm/input-observation.schema.json",
+  "title": "move-proposer INPUT (the structured observation shown to the local LLM)",
+  "description": "The deterministic state presented to the move proposer each turn, as JSON. Built ONLY from real agent primitives (no RNG/hash, DP-10). Carries the recognized world (world/objects), the controls usable THIS turn (inputs), a non-authoritative goal_hint, the system's known lexicon, executable goal_templates, and a vocabulary of primitives for proposals. Pass ONLY usable info - the classical side controls what each field contains per game. NOTE: this file is a DEV CONTRACT; it is NEVER sent to the model. The model receives a data INSTANCE conforming to it (no $schema/$id/description headers).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["meta", "inputs", "world", "objects"],
+  "properties": {
+    "meta": {
+      "description": "Turn-level scalars.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["turn", "level", "score"],
+      "properties": {
+        "turn": { "type": "integer", "minimum": 0, "description": "Move index this game." },
+        "level": { "type": "integer", "minimum": 0, "description": "levels_completed so far." },
+        "score": { "type": "integer", "description": "Current score / levels gained (game-defined)." },
+        "grid_size": {
+          "type": "object", "additionalProperties": false,
+          "properties": { "height": { "type": "integer" }, "width": { "type": "integer" } },
+          "description": "Board dims (typically 64x64). Coordinates everywhere are (row, col), 0-based, row down / col right."
+        },
+        "llm_budget_left": { "type": "integer", "minimum": 0, "description": "Remaining consults this game (RHAE bound)." }
+      }
+    },
+
+    "inputs": {
+      "description": "The controls usable THIS turn - and ONLY these exist for the model. Two kinds: named button presses, and (optionally) an arbitrary-cell screen click. The output 'move' is narrowed to exactly what appears here. Engine action ids (ACTIONn) are deliberately absent: the classical adapter maps a button name to the engine input, so the model never sees 'ACTIONn'.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["buttons"],
+      "properties": {
+        "buttons": {
+          "description": "Usable simple controls this turn. Empty if only clicking is available.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name"],
+            "properties": {
+              "name": { "type": "string", "description": "Short usable-button handle (e.g. 'up', 'left', 'confirm'). Maps to an engine input in the classical adapter. A HINT to meaning only." },
+              "effect": { "type": ["string", "null"], "description": "Grounded effect as a GEOMETRIC change ('row -1', 'col +1', or both) or a state change ('toggles the light') - NEVER a direction word like up/left, so the model reasons from geometry, not the button name. null if not yet learned. A proxy-LLM test showed direction-word effects make even a strong model pick by the button name." }
+            }
+          }
+        },
+        "click": { "type": "boolean", "description": "Whether ScreenClick (point an arbitrary cell at row/col) is usable this turn. When true, 'move' may be {click:{row,col}}." }
+      }
+    },
+
+    "goal_hint": {
+      "description": "An OPTIONAL, NON-authoritative goal guess from the classical pipeline. The LLM may confirm or override it; never treat it as fact (it can be degenerate). null = no guess.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "type": "string", "description": "goal_kind id the classical side guessed (may be wrong)." },
+        "description": { "type": "string", "description": "One-line natural-language guess." },
+        "predicate": { "type": "string", "description": "Optional formal predicate, for transparency." },
+        "confidence": { "type": "string", "enum": ["low", "medium", "high"], "description": "How much the classical side trusts this hint." },
+        "satisfied": { "type": "boolean", "description": "Whether the classical side thinks the predicate already holds." }
+      }
+    },
+
+    "lexicon": {
+      "description": "Words the system already knows (its synthesized vocabulary). The LLM should reuse these in goal descriptions/refs rather than invent jargon. Optional.",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+
+    "goal_templates": {
+      "description": "The win-goals the system can already EXECUTE this turn (active goal_patterns). goal_prediction.template is narrowed to these ids (+ null). Optional; absent => template may only be null (the model must imagine the goal).",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string", "description": "goal_pattern id (e.g. gp-reach-object) - the dispatch key the model picks for `template`." },
+          "kind": { "type": "string", "description": "Its goal_kind (e.g. reach-config)." },
+          "summary": { "type": "string", "description": "One-line: what winning looks like." }
+        }
+      }
+    },
+
+    "vocabulary": {
+      "description": "The known primitives the model may use to PROPOSE new catalog rows (proposals.goal_patterns / proposals.roles). Every id is an existing catalog entry; a proposal using anything outside these is rejected by the classical FK gate. Optional; absent => no goal_pattern/role proposals are admissible.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "operators": { "type": "array", "items": { "type": "string" }, "description": "Operator word ids usable in predicates (e.g. matches, inside, overlaps, adjacent, has, and, not, or, forall, exists)." },
+        "roles": { "type": "array", "items": { "type": "string" }, "description": "Role labels usable in predicates (e.g. controllable, target, reference, hazard)." },
+        "goal_kinds": { "type": "array", "items": { "type": "string" }, "description": "goal_kind ids a proposed pattern may declare (e.g. reach-config, replicate-template)." },
+        "solver_kinds": { "type": "array", "items": { "type": "string" }, "description": "solver ids a proposed pattern may request (e.g. shortest_path, csp)." }
+      }
+    },
+
+    "world": {
+      "description": "A compact summary of the learned world model.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["n_objects", "n_roles"],
+      "properties": {
+        "n_objects": { "type": "integer", "description": "Salient objects recognized." },
+        "n_roles": { "type": "integer", "description": "Distinct functional roles present." },
+        "induced_move_rules": { "type": "integer", "description": "Interaction/move rules induced (0 = effects not yet learned)." },
+        "viewport": { "type": "string", "enum": ["static", "scrolling"], "description": "Does the board scroll (world > viewport)?" },
+        "notes": { "type": "string", "description": "Optional free-text caveats (e.g. 'field/ground present')." }
+      }
+    },
+
+    "objects": {
+      "description": "Recognized objects in LLM-meaningful terms (semantic ref/role/color/shape/relative, NOT raw obj ids + absolute coords). Bounded: salient/role-bearing only, cap ~6; absolute (row,col) given on targets/clickables so clicks can copy them.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ref", "role", "position"],
+        "properties": {
+          "ref": { "type": "string", "description": "Short stable handle (e.g. 'avatar', 'goal-box'). Semantic, not the internal obj_NNNN id." },
+          "role": {
+            "type": "string",
+            "description": "Functional role.",
+            "enum": ["controllable", "target", "field", "hazard", "reference", "carried-state", "interactor", "ref", "other"]
+          },
+          "color": { "type": ["string", "integer"], "description": "Dominant color (palette index 0..15 or a name)." },
+          "shape": { "type": "string", "description": "Coarse shape descriptor (e.g. 'plus', 'box', 'ring', 'dot', 'L', 'line', 'blob')." },
+          "size": {
+            "type": "object", "additionalProperties": false,
+            "properties": { "height": { "type": "integer" }, "width": { "type": "integer" }, "cells": { "type": "integer" } },
+            "description": "Bounding-box extent (height, width) and/or filled cell count."
+          },
+          "position": {
+            "type": "object", "additionalProperties": false,
+            "required": ["row", "col"],
+            "properties": { "row": { "type": "integer" }, "col": { "type": "integer" } },
+            "description": "Centroid (row, col). A click copies this directly into move.click."
+          },
+          "relative": { "type": "string", "description": "Offset to the controllable as (row, col) deltas, e.g. 'from avatar: row +0, col +18', or a non-directional relation ('encloses the avatar'). Avoid bare up/down/left/right - keep direction words out of the data." },
+          "flags": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Salient behavior flags actually detected (e.g. 'marked', 'movable', 'lethal', 'clickable'). Empty if none grounded."
+          }
+        }
+      }
+    },
+
+    "pointers": {
+      "description": "Convenience shortcuts into 'objects' by role (refs), so the model needn't scan. Optional; absent role -> omitted/empty.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "controllable": { "type": ["string", "null"], "description": "ref of the avatar, or null if none identified." },
+        "targets": { "type": "array", "items": { "type": "string" } },
+        "hazards": { "type": "array", "items": { "type": "string" } },
+        "fields": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+
+    "recent_actions": {
+      "description": "Optional short history to avoid loops / show what was just tried and its effect. 'action' uses the same control vocabulary as inputs (a button name, or 'click').",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "action": { "type": "string", "description": "A button name, or 'click'." },
+          "row": { "type": "integer" }, "col": { "type": "integer" },
+          "changed": { "type": "boolean", "description": "Did the board change (progress) or not (no-op/futile)?" }
+        }
+      }
+    },
+
+    "last_note": {
+      "type": ["string", "null"],
+      "description": "The one-line `note` the model wrote on the PREVIOUS turn, echoed back verbatim by the classical side (pure passthrough, not interpreted). null on the first turn. Lets the model follow up on the hypothesis it was testing instead of re-deriving intent each turn (anti-thrash)."
+    }
+  }
+}

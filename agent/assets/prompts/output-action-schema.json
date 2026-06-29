@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "arc-agi-3/llm/output-action.schema.json",
+  "title": "move-proposer OUTPUT (predicted goal + chosen move + optional proposals)",
+  "description": "PROPOSE-ONLY. The model emits its predicted win-goal FIRST (CoT-in-JSON), then the single move it derives from that goal, then OPTIONAL proposals (new vocabulary / goal-patterns / roles) for the system to learn. The classical master verifies/disposes; proposals are validated by the existing AssetLoader FK/operator gate and admitted at runtime (origin='proposed'), never written to the shipped TSVs. There is deliberately NO 'pass' value. This schema is the constrained-decoding grammar for goal_prediction+move; proposals are validated post-parse, not narrowed. NOTE: this file is a DEV CONTRACT for the loader/decoder/validator - it is NEVER sent to the model.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["goal_prediction", "move"],
+  "properties": {
+    "goal_prediction": {
+      "description": "The model's inferred win-goal, emitted before the move so it acts as reasoning.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["template", "description", "confidence"],
+      "properties": {
+        "template": {
+          "type": ["string", "null"],
+          "description": "id of a matching entry from the input's goal_templates[] (a win-goal the system can already execute), or null if none fits. The loader narrows this enum to goal_templates[].id + [null]. When null, the model should IMAGINE the goal via proposals.goal_patterns."
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 160,
+          "description": "One-line natural-language win-goal. Reuse input lexicon words; do not invent jargon."
+        },
+        "target": {
+          "type": ["string", "null"],
+          "description": "ref of the object to aim at (an input objects[].ref), or null. Post-parse: a ref absent from objects is invalid -> DECLINE."
+        },
+        "confidence": {
+          "type": "string",
+          "enum": ["low", "medium", "high"],
+          "description": "Self-reported inference accuracy, raised only with evidence (NOT a copy of goal_hint.confidence): low early, medium once effects are grounded and the goal fits, high only after the goal has held across turns. low => the move MUST be exploratory."
+        }
+      }
+    },
+    "move": {
+      "description": "The single control to send. Exactly one of: a button press, or a screen click. The loader keeps only the branches usable THIS turn and narrows the button enum to inputs.buttons[].name.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["button"],
+          "properties": {
+            "button": {
+              "type": "string",
+              "description": "name of a usable button from inputs.buttons. The loader narrows this enum to this turn's names; the classical adapter maps the name to the engine input."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["click"],
+          "properties": {
+            "click": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["row", "col"],
+              "description": "Point an arbitrary cell (ScreenClick). Same (row, col) convention as objects[].position, so a target position copies in directly. The adapter converts (row, col) to the engine's ACTION6 (x=col, y=row).",
+              "properties": {
+                "row": { "type": "integer", "minimum": 0, "maximum": 63, "description": "0-based, top->bottom." },
+                "col": { "type": "integer", "minimum": 0, "maximum": 63, "description": "0-based, left->right." }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "proposals": {
+      "description": "OPTIONAL. Things the model coins THIS turn for the system to validate and maybe persist for future turns. Each sub-list is capped and advisory: proposals NEVER affect the move. Each is admitted ONLY if it passes the classical AssetLoader gate (predicate parses; every operator/role/goal_kind/solver_kind is an existing id; FK-closed) and contains no game-specific literals; survivors enter the runtime registry as origin='proposed'. Emitted LAST so a max_new_tokens truncation drops proposals before it could drop the move. solvers and new-detector words are NOT proposable here (they need code).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "lexicon": {
+          "type": "array",
+          "maxItems": 2,
+          "description": "New words for a recurring thing the lexicon lacks.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["term", "definition"],
+            "properties": {
+              "term": { "type": "string", "maxLength": 24, "description": "A new one/two-word name." },
+              "definition": { "type": "string", "maxLength": 80, "description": "One line, grounded in what is observed." },
+              "ref": { "type": ["string", "null"], "description": "An objects[].ref the term names, or null." }
+            }
+          }
+        },
+        "goal_patterns": {
+          "type": "array",
+          "maxItems": 2,
+          "description": "A NEW win-goal composed only from known primitives, used when no goal_template fits.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["predicate", "goal_kind", "solver_kinds"],
+            "properties": {
+              "predicate": { "type": "string", "maxLength": 120, "description": "A predicate built ONLY from vocabulary.operators and vocabulary.roles, e.g. matches(target, reference). No literals/coordinates/colors." },
+              "goal_kind": { "type": "string", "description": "A goal_kind id from vocabulary.goal_kinds." },
+              "solver_kinds": { "type": "array", "items": { "type": "string" }, "description": "Solver ids from vocabulary.solver_kinds that could execute it." }
+            }
+          }
+        },
+        "roles": {
+          "type": "array",
+          "maxItems": 2,
+          "description": "A NEW functional role recognized from known operators.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["label", "recognized_by"],
+            "properties": {
+              "label": { "type": "string", "maxLength": 24, "description": "A new role label, e.g. 'reference'." },
+              "recognized_by": { "type": "string", "maxLength": 120, "description": "A predicate over vocabulary.operators recognizing it, e.g. and(has(marked), not(has(controllable)))." }
+            }
+          }
+        }
+      }
+    },
+    "confidence_nudges": {
+      "description": "OPTIONAL. Advisory requests to the classical side to nudge an EXISTING belief's confidence - NOT a number. The model gives target + direction only; the classical side owns the magnitude (a small fixed step), weights it BELOW its own empirical evidence, clamps to [0,1], and bounds per-turn change (anti-feedback-loop). Emitted LAST. Never affects the move. Same propose/dispose pattern as proposals. Only object/role/goal beliefs are nudgeable - NOT effect grounding (that is purely empirical / classical-owned).",
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["on", "direction"],
+        "properties": {
+          "on": { "type": "string", "description": "What to nudge: an objects[].ref, a goal_templates id, or a role label." },
+          "direction": { "type": "string", "enum": ["up", "down"], "description": "Raise or lower that belief a little." },
+          "why": { "type": "string", "maxLength": 80, "description": "One line of evidence; logged and sanity-checked by the classical side." }
+        }
+      }
+    },
+    "note": {
+      "type": "string",
+      "maxLength": 140,
+      "description": "OPTIONAL one-line scratchpad to the model's OWN next turn (a question or the hypothesis it is testing, e.g. 'pressed a on the red dot - next turn check if it moved'). The classical side stores it and echoes it back verbatim as last_note next turn (pure passthrough, not interpreted). NOT for lasting knowledge (use proposals) or restating the goal. Capped at 140 chars: the 256-token output is shared with goal/move/proposals/nudges, so a one-line note (~35 tokens) cannot starve the move. Emitted LAST."
+    }
+  },
+  "$comment": "Generation order: goal_prediction.{template,description,target,confidence}, then move, then optional proposals, then optional confidence_nudges, then optional note (last). reason-free (goal_prediction.description is the rationale). The click branch is dropped from the grammar unless inputs.click is true. proposals and confidence_nudges are advisory: proposals are validated/promoted by the classical AssetLoader FK gate; confidence_nudges are applied by the classical side as a small clamped step weighted below its own evidence; note is round-tripped untouched. None is constrained-narrowed. Greedy do_sample=false (DP-10). RESET and engine action ids never appear here: name<->GameAction mapping lives in the classical adapter, so the model surface carries no 'ACTIONn'."
+}

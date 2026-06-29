@@ -1,6 +1,6 @@
-"""agent/core -- the v024-aligned self-solve loop (seed of the real agent).
+"""GR-ARC-3 core (Clean Architecture inner ring) — v14 entities + use cases.
 
-Grown empirically by the thinnest vertical slice (ls20 L1 self-solve). Reuses the
-general primitives from agent/ (segment, controllable) by import; never imports the
-belief-era modules and never imports tools/ (the test environment lives there).
+Rebuilt from the specification on 2026-06-27 (see ``agent/__init__.py``). The
+data model mirrors ``docs/StrictDoc-specs/_assets/gr-arc-3-domain-model.json``
+v029 (Lexicon / Word / Relation / Role / Characteristic / Profile / Goal).
 """

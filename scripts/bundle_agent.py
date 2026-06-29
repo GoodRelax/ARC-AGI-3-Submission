@@ -30,8 +30,22 @@ ROOT = Path(__file__).resolve().parents[1]
 PKG = ROOT / "agent"
 OUT = PKG / "my_agent.py"
 
-# Embed source plus the settings JSON the package loads package-relatively.
-_INCLUDE_SUFFIXES = {".py", ".json"}
+# Embed source plus the data assets the package loads package-relatively:
+#   .py    — the agent modules
+#   .json  — settings JSON + the move-proposer schemas
+#            (agent/assets/prompts/{input-observation,output-action}-schema.json,
+#            loaded by core/llm_prompt.py at runtime).
+#   .tsv   — the v14 asset catalogs (agent/assets/*.tsv: words, relations, roles,
+#            goal_patterns, goal_kinds, solvers) that AssetLoader reads at init.
+#            Without these the agent cannot construct (even the classical path),
+#            so they MUST be bundled.
+#   .md    — the move-proposer prompt template
+#            (agent/assets/prompts/prompt-template.md, loaded by
+#            core/llm_prompt.load_prompt() at runtime). Without it the LLM
+#            proposer cannot construct and declines. The ONLY .md under agent/
+#            is this template (verified), so the bare suffix is safe; this
+#            mirrors the proven practice builder (build_practice_kernel.py).
+_INCLUDE_SUFFIXES = {".py", ".json", ".tsv", ".md"}
 
 
 def _bundled_files() -> list[Path]:
