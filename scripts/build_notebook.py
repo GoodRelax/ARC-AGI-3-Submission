@@ -28,7 +28,7 @@ from textwrap import dedent
 #   "rtx6000"  — Nvidia RTX 6000 (g4-standard-48). ARC-AGI-3 exclusive,
 #                burns GPU quota faster — use only when you're confident.
 # ─────────────────────────────────────────────────────────────────────────────
-ACCELERATOR = "cpu"
+ACCELERATOR = "t4"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LOCAL-LLM (Qwen) move proposer. When ENABLE_LLM is True the competition cell
@@ -48,7 +48,7 @@ ACCELERATOR = "cpu"
 # That is the whole classical recipe: ACCELERATOR=cpu, ENABLE_LLM=False, drop
 # model_sources (manual), drop dataset_sources (automatic).
 # ─────────────────────────────────────────────────────────────────────────────
-ENABLE_LLM = False
+ENABLE_LLM = True
 # Offline constrained-decoding wheels (transformers 4.44.2 + lm-format-enforcer
 # 0.10.9 + transitive deps) live in this Kaggle Dataset; attached via
 # dataset_sources when ENABLE_LLM. Cleared automatically for the classical build.
@@ -57,7 +57,7 @@ WHEELS_DATASET_SLUG = "goodrelax/arc-agi3-llm-wheels"
 # <version>" at /kaggle/input/<owner>/<model>/<framework>/<variation>/<version>.
 # The agent's _resolve_model_path auto-discovers config.json under this root, so
 # a nested version dir still resolves even if the exact leaf differs.
-LLM_MODEL_MOUNT = "/kaggle/input/qwen-lm/qwen2.5/transformers/1.5b-instruct/1"
+LLM_MODEL_MOUNT = "/kaggle/input/qwen-lm/qwen2.5/transformers/7b-instruct/1"
 
 # Internal mapping; don't edit unless Kaggle adds new options.
 _ACCELERATORS = {
@@ -212,9 +212,14 @@ __LLM_ENV__                python main.py --agent myagent
     # We use a literal-token replace (not str.format) because the run cell body
     # contains unescaped { } braces (the rewritten agents/__init__.py dict).
     if ENABLE_LLM:
+        # ARC_LLM_DEADLINE_EPOCH: stamp the wall time at agent start so the agent's
+        # notebook-GLOBAL 9 h LLM deadline (12 h cap - 3 h safety) is measured from
+        # here; past it the LLM goes silent and the classical baseline finishes the
+        # run well within 12 h (a timeout would forfeit the whole submission).
         llm_env = (
             "                ARC_LLM=1 \\\n"
             f"                ARC_LLM_MODEL={LLM_MODEL_MOUNT} \\\n"
+            "                ARC_LLM_DEADLINE_EPOCH=$(python -c 'import time;print(time.time())') \\\n"
         )
     else:
         llm_env = ""

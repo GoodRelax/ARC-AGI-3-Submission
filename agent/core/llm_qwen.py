@@ -41,6 +41,27 @@ from agent.core.llm import GeneratorError
 
 _log = logging.getLogger(__name__)
 
+# Process-level cache of a loaded ``(tokenizer, model, device_used, fallback_reason)``
+# keyed by the RESOLVED model dir. The framework reconstructs the agent (and thus a
+# fresh QwenGenerator) PER GAME, so without this every game would reload ~15 GB of 7B
+# weights from disk -- ~40 min wasted over a 55-game run plus repeated VRAM churn (OOM
+# risk). Populated on the first successful load; later instances reuse it. Same-process
+# only (a fresh process / kernel starts empty, which is correct).
+_MODEL_CACHE: Dict[str, Any] = {}
+
+
+def _read_max_time_env(default: float) -> float:
+    """Per-consult generation time cap (seconds) from ``ARC_LLM_MAX_TIME``; a
+    non-float value -> ``default``; ``<= 0`` -> ``0.0`` = cap DISABLED. Deterministic."""
+    raw = os.getenv("ARC_LLM_MAX_TIME")
+    if raw is None:
+        return default
+    try:
+        value = float(raw.strip())
+    except (ValueError, AttributeError):
+        return default
+    return value if value > 0 else 0.0
+
 
 def _resolve_model_path(path: str) -> str:
     """Return a local dir that actually holds the model (contains ``config.json``).
@@ -104,10 +125,20 @@ class QwenGenerator:
         *,
         dtype: str = "float16",
         name: str = "qwen",
+        max_time: Optional[float] = None,
     ) -> None:
         self.name = name
         self.model_path = model_path
         self.dtype = dtype
+        # Per-consult GENERATION time cap (seconds) passed to generate() as
+        # ``max_time`` -> a transformers MaxTimeCriteria that stops decoding after
+        # the bound. Bounds the generation loop ONLY (NOT prefill -- a large prompt's
+        # prefill is bounded upstream by the observation/prompt size). A time-stop can
+        # truncate the JSON; propose() then raises GeneratorError -> consult() falls
+        # back to classical (safe). Default from ARC_LLM_MAX_TIME (env), else 20 s.
+        if max_time is None:
+            max_time = _read_max_time_env(20.0)
+        self.max_time = max_time
         self.constrained = False
         self.device_used: Optional[str] = None  # "cuda" | "cpu" (set in load)
         self.fallback_reason: Optional[str] = None
@@ -135,6 +166,13 @@ class QwenGenerator:
 
             self._torch = torch
             resolved = _resolve_model_path(self.model_path)
+
+            # Reuse a model already loaded in THIS process (per-game agents share it).
+            cached = _MODEL_CACHE.get(resolved)
+            if cached is not None:
+                self._tok, self._model, self.device_used, self.fallback_reason = cached
+                self._loaded = True
+                return
 
             use_gpu, reason = False, "no cuda"
             if torch.cuda.is_available():
@@ -166,6 +204,9 @@ class QwenGenerator:
                 torch_dtype=td,
                 device_map=device_map,
                 local_files_only=True,
+            )
+            _MODEL_CACHE[resolved] = (
+                self._tok, self._model, self.device_used, self.fallback_reason
             )
             self._loaded = True
         except Exception as exc:  # noqa: BLE001 - any load failure -> GeneratorError
@@ -222,6 +263,10 @@ class QwenGenerator:
         prefix_fn = self._prefix_fn(schema)
         self.constrained = bool(prefix_fn)
         gkw = {"prefix_allowed_tokens_fn": prefix_fn} if prefix_fn else {}
+        # Per-consult generation time cap (transformers MaxTimeCriteria). Bounds the
+        # decode loop only; truncation -> non-JSON -> GeneratorError -> classical.
+        if self.max_time and self.max_time > 0:
+            gkw["max_time"] = self.max_time
         with torch.no_grad():
             out = self._model.generate(
                 **inputs,

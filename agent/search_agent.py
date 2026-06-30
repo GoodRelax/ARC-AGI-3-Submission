@@ -38,6 +38,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Tuple
 
 import numpy as np
@@ -187,6 +188,19 @@ class OurSearchAgent(Agent):
         self._llm = self._build_llm()
         self._llm_budget = self._read_llm_budget()
         self._llm_consults = 0
+        # Wall-clock guards (the count budget above is a cheap proxy; these are the
+        # true TIME bound). Purpose is solely to never exceed the 12 h notebook cap --
+        # a timeout loses the WHOLE submission (worse than the classical floor), while
+        # LLM latency is free for RHAE scoring. Three layers: per-game cumulative LLM
+        # seconds, a per-game ceiling, and a notebook-GLOBAL deadline (see _llm_active).
+        self._llm_time_spent = 0.0  # cumulative consult seconds THIS game (process)
+        self._llm_per_game_s = self._read_llm_env_float("ARC_LLM_GAME_S", 480.0)
+        self._llm_deadline_s = self._read_llm_env_float("ARC_LLM_DEADLINE_S", 32400.0)
+        # Notebook-start wall epoch for the GLOBAL deadline. The kernel writes
+        # ARC_LLM_DEADLINE_EPOCH=<time.time()> ONCE before the run so elapsed = now -
+        # epoch is notebook-global across the per-game agent processes; unset -> this
+        # process's start (a safe per-process fallback).
+        self._llm_epoch = self._read_llm_epoch()
         self._last_move_source = "baseline"
         # (x, y) carried by the most recent ACCEPTED LLM complex-action proposal this
         # turn (else None -> the baseline coverage lattice is used). Reset each turn.
@@ -302,6 +316,17 @@ class OurSearchAgent(Agent):
         # navigate / click-navigate so they only fire when the round-robin is STUCK.
         self._no_progress_streak: int = 0
         self._prev_mhash: Optional[bytes] = None
+        # No-LEVEL-progress streak: turns since levels_completed last increased. On a
+        # CLICK game the masked board churns every click (so _no_progress_streak keeps
+        # resetting) yet no level is won -- this catches that "busy but not winning"
+        # stall so the LLM may take over once blind click-coverage has exhausted its
+        # targets. STALL turns env-tunable (ARC_LLM_STALL, default 30).
+        self._no_level_progress_streak: int = 0
+        self._prev_levels: int = -1
+        try:
+            self._LLM_STALL_TURNS: int = int(os.environ.get("ARC_LLM_STALL", "30"))
+        except (TypeError, ValueError):
+            self._LLM_STALL_TURNS = 30
         # Turns of no board change before navigate/click-navigate may deviate from
         # the round-robin (conservative: brief stalls don't trigger wrong-target aiming).
         # Env-tunable (ARC_AIM_STUCK) for offline config sweeps; default 6.
@@ -505,13 +530,47 @@ class OurSearchAgent(Agent):
             return self._DEFAULT_LLM_BUDGET
         return value if value >= 0 else self._DEFAULT_LLM_BUDGET
 
+    @staticmethod
+    def _read_llm_env_float(name: str, default: float) -> float:
+        """A positive float from env ``name`` (default ``default``); a non-float /
+        non-positive value falls back to the default (fail-safe). Deterministic."""
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+        try:
+            value = float(raw.strip())
+        except (ValueError, AttributeError):
+            return default
+        return value if value > 0 else default
+
+    @staticmethod
+    def _read_llm_epoch() -> float:
+        """The notebook-start wall epoch for the GLOBAL LLM deadline. Reads
+        ``ARC_LLM_DEADLINE_EPOCH`` (a ``time.time()`` float the kernel writes ONCE
+        before the run) so elapsed = ``now - epoch`` is notebook-global across the
+        per-game agent processes; unset / unparseable -> this process's start (a safe
+        per-process fallback that still bounds time, just per game)."""
+        raw = os.getenv("ARC_LLM_DEADLINE_EPOCH")
+        if raw is not None:
+            try:
+                return float(raw.strip())
+            except (ValueError, AttributeError):
+                pass
+        return time.time()
+
     def _llm_active(self) -> bool:
         """Whether the move proposer is live this turn: the toggle is on, a real
-        backend is wired (not NullGenerator), and the budget is not exhausted."""
+        backend is wired (not NullGenerator), AND all three wall-clock guards hold --
+        the per-game consult COUNT, the per-game cumulative LLM TIME, and the
+        notebook-GLOBAL deadline. Past ANY guard the LLM goes silent and the classical
+        baseline finishes the run: a graceful degrade to the classical floor, never a
+        12 h timeout (which would forfeit the whole submission)."""
         return (
             self._llm_toggle_on()
             and not isinstance(self._llm, NullGenerator)
             and self._llm_consults < self._llm_budget
+            and self._llm_time_spent < self._llm_per_game_s
+            and (time.time() - self._llm_epoch) < self._llm_deadline_s
         )
 
     # -- Agent interface ---------------------------------------------------- #
@@ -677,6 +736,13 @@ class OurSearchAgent(Agent):
         else:
             self._no_progress_streak = 0
         self._prev_mhash = cur_mhash
+        # No-level-progress streak (click-stall signal; see __init__).
+        cur_levels = int(getattr(latest_frame, "levels_completed", 0) or 0)
+        if cur_levels > self._prev_levels:
+            self._no_level_progress_streak = 0
+        else:
+            self._no_level_progress_streak += 1
+        self._prev_levels = cur_levels
         aim_stuck = self._no_progress_streak >= self._AIM_STUCK_TURNS
         if self._navigate_on and aim_stuck:
             try:
@@ -711,6 +777,32 @@ class OurSearchAgent(Agent):
         #     no-op and the committed action is the classical move. self._last_move_source
         #     records which leg won (surfaced in capture/trace).
         self._last_move_source = classical_source
+        # Y-team investigation hook (ARC_DUMP_OBS=<path>): dump the move-proposer
+        # observation each turn for offline briefing analysis -- runs on the classical
+        # path too (no torch), gated, never load-bearing. Default-unset = byte-identical.
+        _dump_path = os.environ.get("ARC_DUMP_OBS")
+        if _dump_path:
+            try:
+                _obs_dump = self.build_observation(situation, parse, latest_frame)
+                _legal_d = [a for a in (latest_frame.available_actions or []) if a != 0]
+                _per = self._action_displacements(_legal_d)
+                _cid = self._controllable_id
+                _hist = self._track_history.get(_cid, []) if _cid else []
+                _obs_dump["_diag"] = {
+                    "last_action": (int(self.last_action_id)
+                                    if self.last_action_id is not None else None),
+                    "ctrl_id": _cid,
+                    "ctrl_hist_len": len(_hist),
+                    "ctrl_footprint_size": (len(_hist[-1][1].cells) if _hist else None),
+                    "per_action_shifts": {
+                        str(a): sorted([list(s) for s in shifts])
+                        for a, shifts in sorted(_per.items())
+                    },
+                }
+                with open(_dump_path, "a", encoding="utf-8") as _fh:
+                    _fh.write(json.dumps(_obs_dump, ensure_ascii=False) + "\n")
+            except Exception as exc:  # noqa: BLE001 - debug overlay, never fatal
+                logger.debug("ARC_DUMP_OBS dump skipped: %r", exc)
         llm_move = self._propose_llm_move(
             situation, parse, latest_frame, classical_id, cur_mhash
         )
@@ -887,9 +979,18 @@ class OurSearchAgent(Agent):
     # Max objects emitted into the observation -- keeps the prompt compact +
     # bounded regardless of board complexity (the frozen contract caps objects ~6).
     _LLM_OBSERVATION_MAX_OBJECTS = 6
-    # Output token budget (matches the prompt frontmatter max_new_tokens=256 and the
-    # proven stage-2 path; the 256 tokens are shared by goal/move/proposals/note).
-    _LLM_MAX_NEW_TOKENS = 256
+    # Output token budget. The ENFORCED proposal (goal_prediction + move) is a small
+    # JSON object (~60-100 tokens); 128 covers it with headroom while ~halving the
+    # generation time vs the old 256 -- a direct wall-clock win on the 12 h cap (the
+    # advisory proposals/note channels may truncate, which only drops the advisory,
+    # never the move).
+    _LLM_MAX_NEW_TOKENS = 128
+    # PREFILL guard: max chars of the rendered system+user prompt a consult will
+    # prefill. max_time bounds generation but NOT the prefill forward pass, so a large
+    # prompt is bounded HERE instead. ~4 chars/token => ~40k chars ~= ~10k tokens,
+    # ~4x the de-bloated normal (~10k chars): a backstop -- the structural caps
+    # (objects <=6, trimmed vocab) are the primary bound.
+    _LLM_MAX_PROMPT_CHARS = 40000
 
     def _propose_llm_move(
         self,
@@ -946,6 +1047,18 @@ class OurSearchAgent(Agent):
 
         observation = self.build_observation(situation, parse, latest_frame)
         messages = llm_prompt.render_messages(self._prompt_tpl, observation)
+        # PREFILL guard (max_time caps generation, not the prefill over a big prompt):
+        # the prompt is already structurally bounded, so this only fires if something
+        # unexpectedly inflates it -> DECLINE to classical rather than pay an unbounded
+        # prefill on the 12 h clock.
+        prompt_chars = sum(len(m.get("content", "")) for m in messages)
+        if prompt_chars > self._LLM_MAX_PROMPT_CHARS:
+            logger.debug(
+                "LLM consult skipped: prompt %d chars > %d cap (prefill guard)",
+                prompt_chars,
+                self._LLM_MAX_PROMPT_CHARS,
+            )
+            return None
         schema = llm_prompt.narrow_schema(self._out_schema, observation)
         self._llm_consults += 1
 
@@ -976,6 +1089,7 @@ class OurSearchAgent(Agent):
             return result
 
         briefing = messages[-1]["content"]  # the user message (for the debug log)
+        _t0 = time.time()
         proposal = consult(
             self._llm,
             messages,
@@ -983,6 +1097,10 @@ class OurSearchAgent(Agent):
             parse=_parse,
             max_new_tokens=self._LLM_MAX_NEW_TOKENS,
         )
+        # Accumulate REAL consult wall-clock into the per-game time guard (read by
+        # _llm_active next turn). Counts whether the proposal was adopted or declined
+        # -- the time was spent regardless.
+        self._llm_time_spent += time.time() - _t0
         if proposal is None:
             self._llm_debug_emit(briefing, _dbg, decision="baseline", action_id=None)
             return None
@@ -1059,24 +1177,22 @@ class OurSearchAgent(Agent):
         baseline_id: Optional[int],
         cur_mhash: Optional[bytes],
     ) -> bool:
-        """Whether THIS turn warrants a consult (the useful-condition gate above).
+        """Whether THIS turn warrants a consult: STUCK or STALLED only.
 
-        True iff a ``target`` role exists (something to steer toward) OR the baseline
-        is stuck/futile (every legal non-RESET move is known-futile from
-        ``cur_mhash``, so the classical curiosity has nothing better to offer).
-        Deterministic; no RNG, no hash."""
-        objects = getattr(situation, "objects", None) or {}
-        if objects.get(self._TARGET_ROLE):
-            return True
-        # Stuck-this-turn: futility is on, we have a masked hash, and every legal
-        # non-RESET move is already known-futile from here.
-        if not self._futility_on or cur_mhash is None:
-            return False
-        legal = [a for a in (latest_frame.available_actions or []) if a != 0]
-        if not legal:
-            return False
-        return all(
-            self._working_memory.is_futile(cur_mhash, a) for a in legal
+        True iff EITHER the masked board has not changed for ``>= _AIM_STUCK_TURNS``
+        turns (directional stuck -- the same gate as navigate/click), OR no LEVEL has
+        been completed for ``>= _LLM_STALL_TURNS`` turns (click-STALL: a click game
+        whose board churns every click yet never wins, where blind click-coverage has
+        run out of road). The LLM is a LAST-RESORT proposer: a mere ``target`` existing
+        is NOT sufficient (firing on that let it displace a still-progressing classical
+        win -- the cd82 regression / 0.01 lesson); only genuine stuckness/stall does,
+        and classical click-navigate keeps move precedence so a game the classical side
+        is winning is never overridden. Deterministic; no RNG, no hash.
+        (``situation``/``latest_frame``/``baseline_id``/``cur_mhash`` kept for signature
+        stability; the streaks live on ``self``.)"""
+        return (
+            self._no_progress_streak >= self._AIM_STUCK_TURNS
+            or self._no_level_progress_streak >= self._LLM_STALL_TURNS
         )
 
     # -- LLM move disposition (validate + adopt/decline, the contract) ------- #
@@ -1300,8 +1416,8 @@ class OurSearchAgent(Agent):
         objects_map = getattr(situation, "objects", None) or {}
         legal = [a for a in (latest_frame.available_actions or []) if a != 0]
 
-        # inputs.buttons (simple controls) + inputs.click (ACTION6).
-        per_action = self._action_displacements(legal)
+        # inputs.buttons (simple controls) + inputs.click (ACTION6). `effect` is the
+        # robust grounded direction / "no-op" / "inconsistent" / null (_action_effect).
         buttons: List[Dict[str, Any]] = []
         click_ok = False
         for a in sorted(legal):
@@ -1311,7 +1427,7 @@ class OurSearchAgent(Agent):
             buttons.append(
                 {
                     "name": game_io.button_name_for_action(a),
-                    "effect": self._action_effect_geometry(a, per_action),
+                    "effect": self._action_effect(a),
                 }
             )
 
@@ -1368,12 +1484,21 @@ class OurSearchAgent(Agent):
         else:
             observation["goal_hint"] = None
 
-        # goal_templates (active patterns) + vocabulary (loaded catalogs) + lexicon.
-        observation["goal_templates"] = self._goal_templates()
+        # goal_templates (active patterns) + vocabulary (loaded catalogs).
+        templates = self._goal_templates()
+        observation["goal_templates"] = templates
+        # Compact per-kind meanings, emitted ONCE (vs the old per-template summary
+        # repeated ~20x): {kind: one-line win condition} for the kinds actually
+        # present this turn. Lets the model read a template's `kind` without the bloat.
+        legend = self._goal_kinds_legend(templates)
+        if legend:
+            observation["goal_kinds_legend"] = legend
         observation["vocabulary"] = self._vocabulary()
-        lexicon_words = self._lexicon_words()
-        if lexicon_words:
-            observation["lexicon"] = lexicon_words
+        # NOTE: the synthesized `lexicon` dump (~70 word ids, ~680 chars/turn) is
+        # intentionally NOT emitted. It existed for the optional `proposals.lexicon`
+        # channel (advisory, never changes the move); for a small model it was pure
+        # noise drowning the objects/effects. Re-add behind a budget gate if the
+        # proposer ever starts composing useful lexicon proposals.
 
         # recent_actions (anti-no-op / anti-loop): the last few played moves +
         # whether the board changed. Omitted when empty (optional schema field).
@@ -1531,21 +1656,34 @@ class OurSearchAgent(Agent):
         remark is long (~793 chars) and carries move-direction words / file:line
         citations, which the frozen contract bars from the DATA. ALL ids are kept
         (that IS the real catalog); only the summary text shrinks."""
-        kind_desc = {k.id: k.description for k in self.assets.goal_kinds}
         out: List[Dict[str, Any]] = []
         for p in sorted(self.assets.goal_patterns, key=lambda p: p.id):
             if getattr(p, "predicate_tree", None) is None:
                 continue
-            out.append(
-                {
-                    "id": p.id,
-                    "kind": p.goal_kind,
-                    "summary": self._short_goal_summary(
-                        kind_desc.get(p.goal_kind, "")
-                    ),
-                }
-            )
+            # {id, kind} only -- the per-template `summary` was the goal_kind's
+            # description, which is IDENTICAL across the many templates sharing a
+            # kind (e.g. 11x "Bring the controllable"), so emitting it per row was
+            # ~1 KB of repeated text. The `kind` id is self-descriptive and the full
+            # kind set is already in `vocabulary.goal_kinds`; the per-kind meanings
+            # ride once in `goal_kinds_legend` (see build_observation), not per row.
+            out.append({"id": p.id, "kind": p.goal_kind})
         return out
+
+    def _goal_kinds_legend(
+        self, templates: List[Dict[str, Any]]
+    ) -> Dict[str, str]:
+        """``{kind: short one-line win condition}`` for the DISTINCT goal_kinds
+        present in ``templates``, sourced from goal_kinds.tsv descriptions (the same
+        text the old per-template ``summary`` carried, but emitted ONCE per kind).
+        Deterministic (sorted keys); empty when no kinds resolve."""
+        kind_desc = {k.id: k.description for k in self.assets.goal_kinds}
+        kinds = sorted({t["kind"] for t in templates if t.get("kind")})
+        legend: Dict[str, str] = {}
+        for k in kinds:
+            summary = self._short_goal_summary(kind_desc.get(k, ""))
+            if summary:
+                legend[k] = summary
+        return legend
 
     @classmethod
     def _short_goal_summary(cls, description: str) -> str:
@@ -1569,7 +1707,12 @@ class OurSearchAgent(Agent):
 
     def _vocabulary(self) -> Dict[str, List[str]]:
         """The known primitive catalogs a proposal may compose from:
-        ``{operators, roles, goal_kinds, solver_kinds}`` (sorted ids). Deterministic."""
+        ``{operators, roles, goal_kinds}`` (sorted ids). Deterministic.
+
+        ``solver_kinds`` (50 ids) is DELIBERATELY omitted: solver SELECTION is the
+        classical layer's job, not the move proposer's -- emitting the full solver
+        catalog every turn was ~750 chars of noise the small model had to wade past
+        to reach the 6 objects + grounded effects that actually drive the move."""
         lex = self.assets.lexicon
         operators = sorted(
             w.id
@@ -1578,12 +1721,10 @@ class OurSearchAgent(Agent):
         )
         roles = sorted(self.assets.roles)
         goal_kinds = sorted(k.id for k in self.assets.goal_kinds)
-        solver_kinds = sorted(s.id for s in self.assets.solvers)
         return {
             "operators": operators,
             "roles": roles,
             "goal_kinds": goal_kinds,
-            "solver_kinds": solver_kinds,
         }
 
     def _lexicon_words(self) -> List[str]:
@@ -1670,19 +1811,131 @@ class OurSearchAgent(Agent):
                 per_action.setdefault(action_id, set()).add(shift)
         return per_action
 
-    def _action_effect_geometry(self, action_id: int, per_action: Dict[int, set]) -> Optional[str]:
-        """The GROUNDED effect of ``action_id`` expressed as (row, col) GEOMETRY
-        (e.g. ``"row +1, col +0"``) -- NEVER a direction word (the frozen contract:
-        a direction-word effect couples the model's choice to the button name, which
-        a proxy test showed even a strong model gets wrong). ``None`` when the effect
-        is not yet grounded (-> the contract's null). A CONSISTENT single-vector
-        effect is rendered; an ambiguous multi-vector one stays ``None`` (no honest
-        single geometry). Deterministic (DP-10)."""
-        shifts = per_action.get(action_id)
-        if not shifts or len(shifts) != 1:
+    # Effect-grounding thresholds (DP-10 deterministic; no rng/hash):
+    #   MIN_TRIES   -- transitions an action needs before a non-moving result is
+    #                  reported as "no-op" (vs the early "unknown" null).
+    #   PLURALITY   -- fraction the modal displacement must hold to set the
+    #                  direction by itself (else fall back to per-axis sign consensus).
+    _EFFECT_MIN_TRIES = 2
+    _EFFECT_PLURALITY = 0.6
+
+    def _action_effect(self, action_id: int) -> Optional[str]:
+        """The ROBUST LLM-facing effect of ``action_id`` on the controllable, as a
+        status string -- NEVER a direction word (the frozen contract: a direction
+        word couples the model's choice to the button name, which a proxy test showed
+        even a strong model gets wrong):
+
+          * ``"row +d, col +d"`` -- a grounded dominant DIRECTION (unit signs). The
+            controllable's translations under this action agree on a clear direction
+            (modal displacement holds a plurality, else every nonzero axis-sign
+            agrees). MAGNITUDE is intentionally dropped: the prompt compares the
+            SIGN to position offsets, and the real step varies with walls / lane gaps
+            (e.g. 10 vs 13), which the old strict single-exact-vector rule nulled.
+          * ``"no-op"``        -- tried >= MIN_TRIES and the controllable NEVER
+            translated (do not re-explore it to make positional progress; it may do
+            something non-positional -- cross-reference recent_actions[].changed).
+          * ``"inconsistent"`` -- it DID translate, but the directions contradict
+            (no plurality AND mixed axis-signs) -> the control is state-dependent
+            (hidden state); not a fixed vector.
+          * ``None``           -- not enough evidence yet (explore to learn it).
+
+        Reads the grounded controllable's own track history (DP-10: sorted, integer
+        cell shifts; no rng/hash). ``None`` when there is no grounded controllable."""
+        from collections import Counter
+
+        cid = self._controllable_id
+        if cid is None:
             return None
-        dr, dc = next(iter(shifts))
-        return "row %+d, col %+d" % (int(dr), int(dc))
+        history = self._track_history.get(cid, [])
+        moves: "Counter[Tuple[int, int]]" = Counter()
+        n_zero = 0
+        for i in range(1, len(history)):
+            if history[i][0] != action_id:
+                continue
+            shift = footprint_shift(history[i - 1][1].cells, history[i][1].cells)
+            if shift is None:  # footprint deformed -> ambiguous, not counted
+                continue
+            if shift == (0, 0):
+                n_zero += 1
+            else:
+                moves[shift] += 1
+        if not moves:
+            return "no-op" if n_zero >= self._EFFECT_MIN_TRIES else None
+        direction = self._dominant_direction(moves)
+        if direction is None:
+            return "inconsistent"
+        return "row %+d, col %+d" % direction
+
+    @staticmethod
+    def _sgn(v: int) -> int:
+        return 1 if v > 0 else -1 if v < 0 else 0
+
+    def _dominant_direction(self, moves: Any) -> Optional[Tuple[int, int]]:
+        """Reduce a ``Counter`` of nonzero ``(dr, dc)`` displacements to a single
+        UNIT direction ``(sgn dr, sgn dc)``, or ``None`` when the action's effect is
+        self-contradictory. Two robust paths (DP-10 deterministic):
+
+          1. PLURALITY: if the modal displacement holds >= ``_EFFECT_PLURALITY`` of
+             the weight, take its signs (robust to a rare mis-track outlier).
+          2. SIGN CONSENSUS: else, an axis is decided iff all its nonzero signs
+             agree; if EITHER axis carries contradictory signs, the effect is not a
+             fixed direction -> ``None``. (Handles "same magnitude family, no single
+             mode" like {(2,0),(5,0)} -> row +.)"""
+        total = sum(moves.values())
+        # Path 1: modal plurality (deterministic tie-break: higher count, then
+        # smaller shift tuple).
+        top_shift, top_ct = sorted(moves.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+        if total and top_ct / total >= self._EFFECT_PLURALITY:
+            dr, dc = top_shift
+            return (self._sgn(dr), self._sgn(dc))
+        # Path 2: per-axis sign consensus.
+        row_signs = {self._sgn(dr) for (dr, _dc) in moves if dr != 0}
+        col_signs = {self._sgn(dc) for (_dr, dc) in moves if dc != 0}
+        if len(row_signs) > 1 or len(col_signs) > 1:
+            return None
+        rr = next(iter(row_signs)) if row_signs else 0
+        cc = next(iter(col_signs)) if col_signs else 0
+        return None if (rr == 0 and cc == 0) else (rr, cc)
+
+    def _action_displacement_vector(
+        self, action_id: int
+    ) -> Optional[Tuple[int, int]]:
+        """A single robust ``(dr, dc)`` displacement WITH MAGNITUDE for navigate to
+        predict the controllable's landing cell, or ``None`` when the action's effect
+        is unreliable. Unlike the LLM-facing :meth:`_action_effect` (which drops
+        magnitude to a unit direction), navigate needs the real step, so this returns
+        the MODAL displacement -- robust to a rare mis-track outlier (plurality) and to
+        a no-single-mode-but-consistent-sign family (e.g. {(2,0),(5,0)}). Returns
+        ``None`` for a self-contradictory action (mixed axis-signs, no plurality) so
+        navigate declines on it (same honesty as the strict rule it replaces, but far
+        less trigger-happy). Reads only the grounded controllable's track history
+        (DP-10: integer shifts, deterministic tie-break; no rng/hash)."""
+        from collections import Counter
+
+        cid = self._controllable_id
+        if cid is None:
+            return None
+        history = self._track_history.get(cid, [])
+        moves: "Counter[Tuple[int, int]]" = Counter()
+        for i in range(1, len(history)):
+            if history[i][0] != action_id:
+                continue
+            shift = footprint_shift(history[i - 1][1].cells, history[i][1].cells)
+            if shift is not None and shift != (0, 0):
+                moves[shift] += 1
+        if not moves:
+            return None
+        total = sum(moves.values())
+        top_shift, top_ct = sorted(moves.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+        if total and top_ct / total >= self._EFFECT_PLURALITY:
+            return top_shift
+        # No clear mode: accept only if every nonzero axis-sign agrees, then use the
+        # modal shift as the representative magnitude for that direction.
+        row_signs = {self._sgn(dr) for (dr, _dc) in moves if dr != 0}
+        col_signs = {self._sgn(dc) for (_dr, dc) in moves if dc != 0}
+        if len(row_signs) > 1 or len(col_signs) > 1:
+            return None
+        return top_shift
 
     # -- navigate (GAP-1: the classical "actually solve" move) ---------------- #
 
@@ -1715,7 +1968,7 @@ class OurSearchAgent(Agent):
              controllable->target. Used when BFS declines (e.g. field detection failed).
 
         ``None`` (defer to the baseline) whenever BOTH decline -- there is no
-        recognized controllable/target, no grounded single-vector effect (effects
+        recognized controllable/target, no robust grounded displacement (effects
         ungrounded early -> the baseline still explores to ground them), or no action
         improves either metric. A KNOWN-FUTILE action this turn (the futility
         WorkingMemory, when the toggle is on) is skipped by both policies so navigate
@@ -1732,15 +1985,16 @@ class OurSearchAgent(Agent):
             return None
         if not legal:
             return None
-        per_action = self._action_displacements(legal)
-        if not per_action:
+        # Early-out gate: if NO action has produced any grounded displacement yet,
+        # there is nothing to navigate with (both policies would decline).
+        if not self._action_displacements(legal):
             return None
 
         # 1. Wall-aware BFS first (strictly dominates greedy when the walkable plane
         #    is known). Guarded: a malformed parse must not break navigate.
         try:
             bfs_id = self._navigate_bfs(
-                objects_map, parse, controllable_rc, target_rc, legal, per_action, cur_mhash
+                objects_map, parse, controllable_rc, target_rc, legal, cur_mhash
             )
         except Exception as exc:  # noqa: BLE001 - BFS is non-load-bearing; fall back
             logger.debug("navigate BFS skipped: %r", exc)
@@ -1750,7 +2004,7 @@ class OurSearchAgent(Agent):
 
         # 2. Greedy Manhattan fallback (the legacy policy; open fields + no-parse).
         return self._navigate_greedy(
-            controllable_rc, target_rc, legal, per_action, cur_mhash
+            controllable_rc, target_rc, legal, cur_mhash
         )
 
     def _click_navigate_move(
@@ -1861,12 +2115,13 @@ class OurSearchAgent(Agent):
         controllable_rc: Tuple[int, int],
         target_rc: Tuple[int, int],
         legal: List[int],
-        per_action: Dict[int, set],
         cur_mhash: Optional[bytes],
     ) -> Optional[int]:
         """GREEDY MANHATTAN navigate (the legacy GAP-1 policy): among legal NON-RESET
-        actions with a grounded single-vector ``(dr, dc)`` controllable displacement,
-        the one whose resulting centroid has the SMALLEST post-move Manhattan distance
+        actions with a ROBUST grounded ``(dr, dc)`` controllable displacement
+        (:meth:`_action_displacement_vector` -- modal vector, declines only on a
+        contradictory action), the one whose resulting centroid has the SMALLEST
+        post-move Manhattan distance
         to the target, but ONLY if strictly less than the current distance; a tie
         breaks by smallest action id (DP-10). Skips known-futile actions when the
         futility toggle is on. ``None`` when no action strictly reduces the distance."""
@@ -1874,10 +2129,11 @@ class OurSearchAgent(Agent):
         best_id: Optional[int] = None
         best_dist: Optional[int] = None
         for action_id in sorted(legal):
-            shifts = per_action.get(action_id)
-            # Grounded single-vector effect only (an ambiguous multi-vector action has
-            # no honest single displacement -> skip; same rule as the LLM `effect`).
-            if not shifts or len(shifts) != 1:
+            # Robust grounded displacement (modal vector; declines only on a truly
+            # contradictory action -- far less trigger-happy than the old strict
+            # exactly-one-vector rule that nulled varying-step / outlier actions).
+            vec = self._action_displacement_vector(action_id)
+            if vec is None:
                 continue
             # Respect futility: never pick a known-futile (state, move) this turn.
             if (
@@ -1886,7 +2142,7 @@ class OurSearchAgent(Agent):
                 and self._working_memory.is_futile(cur_mhash, action_id)
             ):
                 continue
-            dr, dc = next(iter(shifts))
+            dr, dc = vec
             moved = (controllable_rc[0] + int(dr), controllable_rc[1] + int(dc))
             new_dist = self._manhattan(moved, target_rc)
             # Keep the strictly-distance-reducing survivor with the smallest new
@@ -1904,7 +2160,6 @@ class OurSearchAgent(Agent):
         controllable_rc: Tuple[int, int],
         target_rc: Tuple[int, int],
         legal: List[int],
-        per_action: Dict[int, set],
         cur_mhash: Optional[bytes],
     ) -> Optional[int]:
         """WALL-AWARE BFS navigate: route the controllable toward the target THROUGH
@@ -1916,7 +2171,8 @@ class OurSearchAgent(Agent):
         distance field is computed FROM the target cells over the walkable set with
         4-connectivity, so ``dist[cell]`` = grid steps to the target (a cell behind a
         wall is unreachable = effectively +inf). For each legal NON-RESET action with a
-        grounded single-vector effect, the controllable centroid is displaced; the
+        ROBUST grounded displacement (:meth:`_action_displacement_vector`), the
+        controllable centroid is displaced; the
         resulting cell must be WALKABLE and have a FINITE BFS distance STRICTLY LESS than
         the controllable's current cell distance. The smallest such distance wins;
         smallest action id breaks a tie (DP-10).
@@ -1950,8 +2206,8 @@ class OurSearchAgent(Agent):
         best_id: Optional[int] = None
         best_d: Optional[int] = None
         for action_id in sorted(legal):
-            shifts = per_action.get(action_id)
-            if not shifts or len(shifts) != 1:
+            vec = self._action_displacement_vector(action_id)
+            if vec is None:
                 continue
             if (
                 self._futility_on
@@ -1959,7 +2215,7 @@ class OurSearchAgent(Agent):
                 and self._working_memory.is_futile(cur_mhash, action_id)
             ):
                 continue
-            dr, dc = next(iter(shifts))
+            dr, dc = vec
             moved = (controllable_rc[0] + int(dr), controllable_rc[1] + int(dc))
             d = dist.get(moved)
             if d is None:  # lands on a wall / off-plane / unreachable cell -> skip

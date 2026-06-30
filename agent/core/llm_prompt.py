@@ -45,6 +45,13 @@ _SYSTEM = re.compile(r"<!--[\s=]*SYSTEM[\s=]*-->", re.I)
 _USER = re.compile(r"<!--[\s=]*USER[\s=]*-->", re.I)
 _EXLIB = re.compile(r"<!--[\s=]*EXAMPLE LIBRARY[\s=]*-->", re.I)
 _EXAMPLE = re.compile(r"<!--\s*example\s+capability=(\w+)\s*-->")
+# Authoring/explanatory HTML comments inside the SYSTEM/USER bodies are NOT prompt
+# content: they get sent to the model verbatim, and the USER comment even carries a
+# literal ``{{OBSERVATION_JSON}}`` that render_messages then substitutes -- injecting
+# the (large) observation a SECOND time. Strip them so the model sees the observation
+# once and no meta-prose. (The EXAMPLE-LIBRARY markers live in their own section,
+# parsed before this strip, so they are unaffected.)
+_BODY_COMMENT = re.compile(r"<!--.*?-->", re.S)
 
 
 @dataclass(frozen=True)
@@ -72,6 +79,10 @@ def load_prompt(md_path: str = PROMPT_MD) -> PromptTemplate:
     body = sys_split[1] if len(sys_split) == 2 else text
     sys_part, rest = _USER.split(body, 1)
     user_part, exlib = (_EXLIB.split(rest, 1) + [""])[:2]
+    # Drop authoring comments from the bodies the model actually receives (the USER
+    # comment otherwise duplicates the whole observation -- see _BODY_COMMENT).
+    sys_part = _BODY_COMMENT.sub("", sys_part)
+    user_part = _BODY_COMMENT.sub("", user_part)
     examples: Dict[str, str] = {}
     parts = _EXAMPLE.split(exlib)
     # parts = [pre, cap1, block1, cap2, block2, ...]

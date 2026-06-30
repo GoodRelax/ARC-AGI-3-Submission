@@ -1,43 +1,58 @@
-# SUBMIT-HANDOFF — classical "aim-when-stuck" score attempt (LLM-OFF, CPU)
+# SUBMIT-HANDOFF — 7B combine score attempt (LLM-ON, Qwen2.5-7B, T4×2)
 
-**Purpose of THIS submission:** a real **score attempt**. The recommended config:
-**LLM OFF + navigate/marked ON + stuck-gate** (the agent runs the proven classical
-round-robin by default and only DEVIATES to aiming when genuinely STUCK).
+**Purpose of THIS submission:** a **score attempt** with the LLM combine =
+**classical floor + Qwen2.5-7B move-proposer × improved input, time-capped**.
+It is a SAFE upside bet over the classical floor: the LLM only fires when the
+classical side is genuinely stuck/stalled, classical navigate/click keeps move
+precedence (so it never displaces a classical win), and it is wall-clock-capped
+so it can never time out — worst case it degrades to the classical floor.
 
-**Why LLM-OFF:** submitted history is decisive — **v1 classical = 0.08** >> **v3
-(LLM + always-on aiming) = 0.01**. Always-on smart moves REGRESSED the score (chased
-wrong targets, broke games the blind round-robin solved). The fix = `aim-when-stuck`:
-navigate/click-navigate fire ONLY after the masked board has not changed for
-`>= ARC_AIM_STUCK` turns (default K=6). Local 25-game offline A/B (LLM off) proved
-**4 levels {cd82, sp80, lp85, vc33}** vs classical's 2 {cd82, sp80} — keeps classical's
-wins AND adds 2 click games (~2x). Dropping the LLM also removes the wheels/Qwen/
-constrained-decoding risk surface — simpler, lower-risk, and empirically better.
+**Why 7B (not the earlier 1.5B that scored 0.01):** the 0.01 run was 1.5B +
+ALWAYS-ON aiming. Two fixes since: (1) the **input** was de-bloated + grounded
+(observation ~12 KB→~3.6 KB, robust button-effect directions, 4-state) — which
+took the proposer from 1 identical degenerate proposal to board-responsive ones;
+(2) the **model** is now 7B — same Qwen2 arch, runs on the bundled
+`transformers==4.44.2`, no wheels rebuild. Offline-verified on 2×T4: 7B picks real
+goals/targets/moves; cd82's 82 min/game → ~9 min after the de-bloat + caps; classical
+wins (cd82/sp80/lp85/vc33) are NOT regressed. Honest expectation: on the 25 PUBLIC
+games the LLM adds no win beyond classical (they are either classical wins or need
+rule/plan/hidden-state beyond a per-move proposer) — its value is a bet on the 55
+HIDDEN games having reasoning-shaped levels a 7B can pick. **Floor stays available
+(see below) if you prefer the safe ~0.08–0.16.**
 
-## State (built & verified — 2026-06-30, classical LLM-OFF build)
-Everything here is ready. `notebooks/submission.ipynb` + `agent/my_agent.py` were
-freshly built from the latest agent and checked:
-- bundle = 30 files incl. the v14 `agent/assets/*.tsv` catalogs and the full classical
-  solving layer in `search_agent.py`: **marked** goal-marker detector (fires the `target`
-  role) + greedy/**BFS navigate** (routes the controllable around walls) + **click-navigate**
-  (clicks a target centroid on click games), all gated behind the **stuck-gate**
-  (`_no_progress_streak` / `ARC_AIM_STUCK`, default K=6). Gate-green (pytest 527).
-  Verified: bundle self-extracts and `OurSearchAgent` imports & registers via the Kaggle
-  (`agents`-first) load path; the stuck-gate is present in the bundled source.
-- **NO offline-deps cell** (classical build drops it) — only the official competition
-  framework wheel (`arc-agi`) is installed, exactly as the starter requires.
-- `notebooks/kernel-metadata.json`: id `goodrelax/arc-prize-2026-arc-agi-3-starter`,
-  `enable_internet:false`, **`enable_gpu:false`**, **`dataset_sources:[]`**, **`model_sources:[]`**.
-- Build constants (`scripts/build_notebook.py`): **`ACCELERATOR="cpu"`, `ENABLE_LLM=False`**.
+## State (built & verified — 2026-06-30, 7B combine LLM-ON build)
+`notebooks/submission.ipynb` + `agent/my_agent.py` freshly built from the latest
+agent and checked:
+- bundle = 30 files (v14 `agent/assets/*.tsv` + prompts) with the full solving layer:
+  **marked**/**navigate(robust displacement)**/**click-navigate** + the **stuck/stall-gated**
+  LLM proposer. Gate-green (pytest 529). Verified the bundle embeds: the wall-clock caps
+  (`ARC_LLM_DEADLINE_EPOCH` global 9 h deadline + per-game time budget), the per-process
+  **model cache** (loads 7B ONCE, not per game), per-consult **`max_time`** + the prefill
+  guard, and the **click-game prompt rule**.
+- Competition cell exports `ARC_LLM=1`, `ARC_LLM_MODEL=<7B mount>`, and stamps
+  `ARC_LLM_DEADLINE_EPOCH=$(python -c 'import time;print(time.time())')` so the global
+  9 h deadline (12 h cap − 3 h safety) is measured from agent start.
+- offline-deps cell installs `transformers==4.44.2` + `lm-format-enforcer==0.10.9`
+  (constrained decoding) from the wheels dataset (guarded → graceful classical fallback).
+- `notebooks/kernel-metadata.json`: `enable_gpu:true`, `dataset_sources:["goodrelax/arc-agi3-llm-wheels"]`,
+  `model_sources:["qwen-lm/qwen2.5/transformers/7b-instruct/1"]`.
+- Build constants (`scripts/build_notebook.py`): **`ACCELERATOR="t4"` (T4×2 = 32 GB → 7B fp16 fits via `device_map="auto"`), `ENABLE_LLM=True`**.
 
-## Prerequisites
-None beyond the competition itself — the classical build needs **no** external dataset
-or model (no `arc-agi3-llm-wheels`, no Qwen mount). Self-contained.
+## Prerequisites (must be accessible to goodrelax)
+- Kaggle model **`qwen-lm/qwen2.5/transformers/7b-instruct/1`** (~15.2 GB, v1 — verified).
+- Kaggle dataset **`goodrelax/arc-agi3-llm-wheels`** (transformers 4.44.2 + lm-format-enforcer wheels).
+Both are declared in `kernel-metadata.json`, so `kernels push` wires them.
 
-## To rebuild the LLM-ON variant (one toggle back)
-Flip `scripts/build_notebook.py` to `ACCELERATOR="t4"` + `ENABLE_LLM=True`, re-add
-`"qwen-lm/qwen2.5/transformers/1.5b-instruct/1"` to `model_sources` in
-`notebooks/kernel-metadata.json` (hand-maintained), then rebuild. Not recommended
-(scored 0.01).
+## Open risks to watch in the Phase-B log
+- **7B VRAM**: needs T4×2 (32 GB). If the scored rerun gives a single GPU, 7B fp16 (~15 GB)
+  may OOM on load → the agent falls back to NullGenerator (classical) — SAFE (no crash) but
+  the LLM is then inert. Check the log for `device_used:"cuda"` + `qwen_loaded:true`.
+- **Wall-clock**: the caps should keep it ≈3–4 h (most games never trigger the LLM). Confirm it finishes < 12 h.
+
+## To fall back to the classical FLOOR (the safe ~0.08–0.16 build)
+Flip `scripts/build_notebook.py` to `ACCELERATOR="cpu"` + `ENABLE_LLM=False`, set
+`model_sources: []` in `notebooks/kernel-metadata.json` (hand-maintained), then rebuild.
+That is the proven aim-when-stuck classical build (no Qwen, no wheels, self-contained).
 
 ## Auth (global kaggle CLI at C:\Python313\Scripts\kaggle.exe)
 ```

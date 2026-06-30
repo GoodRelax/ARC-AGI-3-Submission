@@ -38,12 +38,21 @@ Rules:
 - If `confidence` is low, EXPLORE: pick a button whose `effect` is still unknown (null) to
   learn it; do not commit to a guessed goal. Never repeat a control that just did nothing
   (`recent_actions[].changed == false`).
+- CLICK GAMES: if NO object has role `controllable` AND `inputs.click` is true, the
+  direction buttons move nothing - do NOT press them to "explore". CLICK instead: pick the
+  single target you most expect advances the goal and set move to its position. Reason about
+  WHICH target (e.g. the one whose colour/shape matches a reference or the goal); each turn,
+  prefer a target you have NOT just clicked with no effect (`recent_actions[].changed`).
 - All spatial facts are (row, col) numbers/offsets. The ONLY direction words are button
   NAMES, which are hints and can be wrong - never choose by the name.
-- Each button has an `effect` given as a GEOMETRIC change (e.g. `row -1`, `col +1`) or a
-  state change - not a direction word. Decide by comparing the effect to positions: e.g.
-  if target.row > avatar.row, pick the button whose effect is `row +1`. One button may
-  move SEVERAL objects.
+- Each button has an `effect`, one of: a GEOMETRIC direction (e.g. `row -1`, `col +1`: the
+  SIGN the controllable moves under it); `null` = effect still UNKNOWN (explore it to learn);
+  `"no-op"` = tried already and it never moves the controllable (do NOT pick it to make
+  positional progress - it may do something non-positional, check `recent_actions[].changed`);
+  `"inconsistent"` = it moved the controllable different ways at different times, so its effect
+  depends on hidden state (not a fixed direction). Decide a move by comparing a GEOMETRIC
+  effect to positions: e.g. if target.row > controllable.row, pick the button whose effect is
+  `row +1`. One button may move SEVERAL objects.
 - `goal_templates` are the win-goals the system can already execute. Set `template` to a
   matching template `id`. If NONE fits, set `template` to null and IMAGINE the goal: add a
   `proposals.goal_patterns` entry whose `predicate` uses only `vocabulary.operators` and
