@@ -88,7 +88,7 @@
       "additionalProperties": false,
       "properties": {
         "operators": { "type": "array", "items": { "type": "string" }, "description": "Operator word ids usable in predicates (e.g. matches, inside, overlaps, adjacent, has, and, not, or, forall, exists)." },
-        "roles": { "type": "array", "items": { "type": "string" }, "description": "Role labels usable in predicates (e.g. controllable, target, reference, hazard)." },
+        "roles": { "type": "array", "items": { "type": "string" }, "description": "Role labels usable in predicates (e.g. controllable, target, template, hazard)." },
         "goal_kinds": { "type": "array", "items": { "type": "string" }, "description": "goal_kind ids a proposed pattern may declare (e.g. reach-config, replicate-template)." },
         "solver_kinds": { "type": "array", "items": { "type": "string" }, "description": "solver ids a proposed pattern may request (e.g. shortest_path, csp)." }
       }
@@ -120,7 +120,7 @@
           "role": {
             "type": "string",
             "description": "Functional role.",
-            "enum": ["controllable", "target", "field", "hazard", "reference", "carried-state", "interactor", "ref", "other"]
+            "enum": ["controllable", "target", "field", "hazard", "template", "held-state", "interactor", "status-object", "other"]
           },
           "color": { "type": ["string", "integer"], "description": "Dominant color (palette index 0..15 or a name)." },
           "shape": { "type": "string", "description": "Coarse shape descriptor (e.g. 'plus', 'box', 'ring', 'dot', 'L', 'line', 'blob')." },

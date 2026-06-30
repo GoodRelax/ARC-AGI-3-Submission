@@ -92,7 +92,7 @@ def identify_goal(
     buckets (the SAME operator interpreter the solver/roles use). A pattern is a
     CANDIDATE iff every role it references is present in the situation WITH >= 1
     object (so an orientation-deliver pattern does not match a board with no
-    ``carried-state``), AND it is not a DEGENERATE / vacuous match (CM-1):
+    ``held-state``), AND it is not a DEGENERATE / vacuous match (CM-1):
 
       * a ``forall``/``exists`` quantifier whose bound domain is EMPTY (the
         quantifier is then vacuously true / its gradient meaningless -- e.g.
@@ -347,7 +347,7 @@ def verbalize_world(
     n_rules = int(world_summary.get("rule_count", 0))
     scrolling = bool(world_summary.get("is_scrolling", False))
     has_field = any(
-        role in ("field", "is_field", "background") for role in objects
+        role in ("field", "background") for role in objects
     )
     parts = [
         "World: %d salient object(s) in %d role(s)" % (n_objects, len(objects)),

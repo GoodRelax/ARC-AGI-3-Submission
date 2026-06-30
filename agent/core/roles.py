@@ -27,10 +27,10 @@ looser role can never STEAL an object an authoritative role already claimed:
     reads ``static`` (its motion rolled out of the affordance window). Assigned
     first, removed from later waves. (Fixes: ``field`` can no longer out-rank the
     grounded avatar.)
-  * Wave B — ``field`` (background): ``has(is_field)`` / ``has(static)`` over the
+  * Wave B — ``field`` (background): ``has(background)`` / ``has(static)`` over the
     REMAINING objects.
-  * Wave C — the RELATIONAL roles (``target`` / ``reference`` / ``hazard`` / the
-    deferred ``ref``): over the REMAINING objects only (an object already ``field``
+  * Wave C — the RELATIONAL roles (``target`` / ``template`` / ``hazard`` / the
+    deferred ``status-object``): over the REMAINING objects only (an object already ``field``
     cannot become one of these), with ``self`` ranging over the wave-A
     controllable set so ``inside(self, box)`` is evaluable. The box-shape
     constraint is REAL — roles.tsv target is
@@ -39,17 +39,17 @@ looser role can never STEAL an object an authoritative role already claimed:
 
 Wave membership is CATEGORY-AWARE (:func:`_is_relational`): a role is RELATIONAL
 (Wave C) if its recognizer mentions ``self`` OR its asset ``category`` is
-``referent``. This closes a syntactic-vs-semantic gap — ``reference``
+``referent``. This closes a syntactic-vs-semantic gap — ``template``
 (``and(has(marked), not(has(controllable)))``) and ``hazard``
 (``and(has(lethal), not(has(controllable)))``) name no ``self`` but ARE referents,
 so without the category key they fell to Wave B and PRE-EMPTED the Wave-C
 ``target`` for a marked / lethal object. Keyed on category, every referent
-(target / reference / ref / hazard) is in the relational wave, so ``target`` is
+(target / template / status-object / hazard) is in the relational wave, so ``target`` is
 ranked against them by the SAME within-wave strict total order (distance ASC,
 restrictiveness DESC, roles.tsv row order ASC) rather than being stolen from an
 earlier wave. For TODAY's catalog ``target`` wins a shared marked / lethal object:
 all referents tie on distance (0) and on restrictiveness (``target``'s ``or`` takes
-its cheapest arm ``has(marked)`` = 1 leaf; ``reference`` / ``hazard`` ``and`` = 1+0
+its cheapest arm ``has(marked)`` = 1 leaf; ``template`` / ``hazard`` ``and`` = 1+0
 = 1), so the row-order tie-break decides and ``target`` precedes them. NOTE this
 last step is row-order ONLY because the referents tie through distance + restrictiveness
 first — a FUTURE referent with a STRICTLY tighter recognizer (more required leaves
@@ -83,15 +83,15 @@ restrictive = ranked first), then roles.tsv row order ASC. NOT raw AST node-coun
 holds, fall through to ``situation.default_role_of`` so projection never yields an
 un-roled object (no-regression).
 
-DORMANT MVP roles (do NOT fire here): the roles.tsv rows ``carried-state``
-(has(pose-mutable)), ``interactor`` (has(interactive)), ``ref``
-(and(has(interactive-target), not(has(controllable)))), ``reference``
+DORMANT MVP roles (do NOT fire here): the roles.tsv rows ``held-state``
+(has(pose-mutable)), ``interactor`` (has(interactive)), ``status-object``
+(and(has(interactive-target), not(has(controllable)))), ``template``
 (and(has(marked), not(has(controllable)))) and ``hazard``
 (and(has(lethal), not(has(controllable)))) never match in the MVP, because their
 ``feat_afford`` sub-modifiers (pose-mutable / interactive / interactive-target /
 marked / lethal) report ABSENT (their evidence — pose-carry / EffectSignature /
 salience — is not wired). So the MVP effectively classifies controllable / field /
-target only. They ARE in the catalog (and ``reference`` / ``hazard`` / ``ref`` /
+target only. They ARE in the catalog (and ``template`` / ``hazard`` / ``status-object`` /
 ``target`` partition into the relational Wave C by category), so the wave order is
 correct the instant a detector lands.
 
@@ -256,7 +256,7 @@ def _is_relational(role: Role) -> bool:
     ``category == 'referent'`` (a relational referent the win predicate reads).
 
     This closes the syntactic-vs-semantic gap that caused the wave defect:
-    ``reference``'s recognizer ``and(has(marked), not(has(controllable)))`` and
+    ``template``'s recognizer ``and(has(marked), not(has(controllable)))`` and
     ``hazard``'s ``and(has(lethal), not(has(controllable)))`` name no ``self``, so
     a self-mention-only partition wrongly dropped them into Wave B where they
     PRE-EMPTED the Wave-C ``target`` for a marked / lethal object. Keying on the
@@ -283,7 +283,7 @@ def _references_word_positive(node: Any, word: str, *, positive: bool = True) ->
     ``controllable`` only under a negation (``ref =
     and(has(interactive-target), not(has(controllable)))``) does NOT belong in Wave
     A — the negated reference is a FILTER ("not the avatar"), not a claim of avatar
-    authority, so ``ref`` partitions by its other structure (it mentions no
+    authority, so ``status-object`` partitions by its other structure (it mentions no
     ``self`` -> Wave B). Determinism: a pure structural walk (no RNG / hash)."""
     if isinstance(node, Relation):
         if node.operator_word_id == "not":

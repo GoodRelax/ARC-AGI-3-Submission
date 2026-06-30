@@ -198,7 +198,7 @@ class EffectSignature:
 
     Five typed handles ONLY — no colour / coordinate / glyph literal (TS-25(c)):
       * ``driver``         — a :data:`DRIVERS` label (direct/indirect/independent);
-      * ``target_type``    — the Role label the effect lands on (e.g. 'self'/'ref');
+      * ``target_type``    — the Role label the effect lands on (e.g. 'self'/'status-object');
       * ``feature``        — a ``Word.id`` axis (position/colour/orientation/...);
       * ``operator``       — a :data:`TRANSFORM_OPERATORS` verb;
       * ``parameter_kind`` — the KIND of parameter (a :data:`PARAMETER_KINDS`

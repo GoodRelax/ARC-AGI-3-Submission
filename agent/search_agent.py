@@ -35,6 +35,7 @@ first (the live path; ``main.py`` does this) loads ``agents.agent`` before line
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
@@ -95,10 +96,10 @@ _SCHEMA_ROLES = frozenset(
         "target",
         "field",
         "hazard",
-        "reference",
-        "carried-state",
+        "template",
+        "held-state",
         "interactor",
-        "ref",
+        "status-object",
         "other",
     }
 )
@@ -163,7 +164,7 @@ class OurSearchAgent(Agent):
         # it now sets the `controllable` Characteristic on the picked object's Profile
         # (see _mark_controllable) so the canonical recognized_by = has(controllable)
         # predicate path tests true and AnalogizeRoles assigns `controllable`
-        # canonically (field via has(static)/has(is_field); target via inside(self,
+        # canonically (field via has(static)/has(background); target via inside(self,
         # box)). Any object no role predicate claims falls through to default_role_of
         # (so non-classified bucketing is identical to a default StateAbstraction --
         # no regression).
@@ -316,6 +317,9 @@ class OurSearchAgent(Agent):
         # navigate / click-navigate so they only fire when the round-robin is STUCK.
         self._no_progress_streak: int = 0
         self._prev_mhash: Optional[bytes] = None
+        # THIS turn's masked board hash (set in choose_action) -- lets the LLM
+        # observation builder read the classical futility memory (system_memory).
+        self._cur_mhash: Optional[bytes] = None
         # No-LEVEL-progress streak: turns since levels_completed last increased. On a
         # CLICK game the masked board churns every click (so _no_progress_streak keeps
         # resetting) yet no level is won -- this catches that "busy but not winning"
@@ -630,6 +634,17 @@ class OurSearchAgent(Agent):
         if self._llm_active():
             self._update_recent_actions(grid)
         parse = divide_frame(grid)
+        # ENCLOSURE-PARTS SURFACING (case A). perceive nests an enclosure's interior
+        # (the ls20 '+' avatar sitting on a panel; a goal frame's target) under
+        # GameObject.parts and returns only TOP-LEVEL nodes. Every consumer below
+        # (controllable id / role classification / observation / census) reads
+        # parse.objects, so a buried object was invisible -- it never reached role
+        # classification or the controllable tracker. Surface EVERY node (parent +
+        # all descendants) here so the whole pipeline sees them. perceive's laminar
+        # tree is unchanged (each node keeps its own .parts).
+        parse = dataclasses.replace(
+            parse, objects=self._flatten_objects(parse.objects)
+        )
         self._df(
             "perceive",
             "divide_frame",
@@ -700,6 +715,7 @@ class OurSearchAgent(Agent):
         #     budget bar does not look like a fresh board. Whole leg gated on the toggle
         #     and guarded (never break the loop); cur_mhash drives CheckFutility below.
         cur_mhash = self._update_futility(grid)
+        self._cur_mhash = cur_mhash  # expose to the LLM observation (system_memory)
 
         # 5. Goal + solver -- CAPTURE RICHNESS ONLY (not used by the baseline action).
         #    Guarded so a malformed pattern / predicate never aborts the turn.
@@ -981,10 +997,13 @@ class OurSearchAgent(Agent):
     _LLM_OBSERVATION_MAX_OBJECTS = 6
     # Output token budget. The ENFORCED proposal (goal_prediction + move) is a small
     # JSON object (~60-100 tokens); 128 covers it with headroom while ~halving the
-    # generation time vs the old 256 -- a direct wall-clock win on the 12 h cap (the
-    # advisory proposals/note channels may truncate, which only drops the advisory,
-    # never the move).
-    _LLM_MAX_NEW_TOKENS = 128
+    # Output token budget. The ENFORCED proposal (goal_prediction + move) is small
+    # (~60-100 tokens); the rest funds the free-form `note` working memory (~100 words
+    # ~= 140 tokens) so it is generated in full and CLOSES the JSON (a too-small budget
+    # truncates the note mid-object -> parse fail -> classical fallback). 256 balances
+    # that against generation wall-clock; the note only fires when the proposer has
+    # something to carry. Env-tunable for A/B.
+    _LLM_MAX_NEW_TOKENS = int(os.environ.get("ARC_LLM_MAX_TOKENS", "256"))
     # PREFILL guard: max chars of the rendered system+user prompt a consult will
     # prefill. max_time bounds generation but NOT the prefill forward pass, so a large
     # prompt is bounded HERE instead. ~4 chars/token => ~40k chars ~= ~10k tokens,
@@ -1339,14 +1358,22 @@ class OurSearchAgent(Agent):
         )
         return complex_ids[0] if complex_ids else None
 
+    # Max chars of the proposer's free-form note (the cross-turn working memory).
+    # Raised from the old one-line 140 so the proposer can carry ~100 words of
+    # accumulated reasoning (what it concluded / what it wants to learn next / the
+    # rule it is pursuing) across its sparse stall-triggered consults. Echoed back
+    # verbatim as observation.last_note; pure passthrough (REPLACED each turn, never
+    # appended, so it cannot drift unbounded).
+    _LLM_NOTE_MAX_CHARS = 600
+
     def _store_llm_note(self, raw: Dict[str, Any]) -> None:
-        """Store the proposer's one-line ``note`` (the rolling scratchpad), to echo
-        back verbatim as ``observation.last_note`` next turn (pure passthrough, not
-        interpreted). A non-string / over-long / absent note clears it. Bounded to
-        the contract's 140 chars. Deterministic; never raises."""
+        """Store the proposer's free-form ``note`` (its cross-turn working memory), to
+        echo back verbatim as ``observation.last_note`` next turn (pure passthrough,
+        not interpreted; replaces last turn's). A non-string / absent note clears it.
+        Bounded to :data:`_LLM_NOTE_MAX_CHARS`. Deterministic; never raises."""
         note = raw.get("note")
         if isinstance(note, str) and note.strip():
-            self._last_note = note.strip()[:140]
+            self._last_note = note.strip()[: self._LLM_NOTE_MAX_CHARS]
         else:
             self._last_note = None
 
@@ -1385,10 +1412,10 @@ class OurSearchAgent(Agent):
 
     # Canonical role labels read off the projected situation for the observation.
     _TARGET_ROLE = "target"
-    _FIELD_ROLES = frozenset({"field", "is_field", "background"})
+    _FIELD_ROLES = frozenset({"field", "background"})
     # Roles whose objects carry an absolute position (targets/clickables) so a
     # click can copy it directly.
-    _POSITION_ROLES = frozenset({"target", "reference", "ref"})
+    _POSITION_ROLES = frozenset({"target", "template", "status-object"})
 
     def build_observation(
         self, situation: Any, parse: Any, latest_frame: Any
@@ -1516,6 +1543,13 @@ class OurSearchAgent(Agent):
         if recent:
             observation["recent_actions"] = recent
 
+        # system_memory (段2 classical -> LLM): the DEAD-ENDS the classical futility
+        # layer already knows from this state, so the proposer stops re-trying what
+        # did nothing (complements the LLM's own free-form `note`). Omitted if empty.
+        mem = self._system_memory(legal)
+        if mem:
+            observation["system_memory"] = mem
+
         # last_note (rolling scratchpad echoed back verbatim).
         observation["last_note"] = self._last_note
         return observation
@@ -1615,6 +1649,34 @@ class OurSearchAgent(Agent):
             logger.debug("board palette skipped: %r", exc)
             return []
 
+    def _system_memory(self, legal: List[int]) -> Dict[str, Any]:
+        """The classical layer's accumulated DEAD-ENDS for THIS state (段2 system->LLM
+        channel): the buttons + click cells the futility memory already knows do
+        nothing here, so the proposer stops re-trying them (it complements the LLM's
+        own free-form `note`). From the futility ``WorkingMemory`` (buttons) + the
+        click-futility set (clicks). Empty when futility is off or nothing is known.
+        Deterministic; never raises."""
+        mem: Dict[str, Any] = {}
+        try:
+            cur = self._cur_mhash
+            if self._futility_on and cur is not None:
+                fb = [
+                    game_io.button_name_for_action(a)
+                    for a in sorted(legal)
+                    if not GameAction.from_id(a).is_complex()
+                    and self._working_memory.is_futile(cur, a)
+                ]
+                if fb:
+                    mem["futile_buttons"] = fb
+            if self._click_futile_here:
+                mem["futile_clicks"] = [
+                    {"row": int(rc[0]), "col": int(rc[1])}
+                    for rc in sorted(self._click_futile_here)
+                ]
+        except Exception as exc:  # noqa: BLE001 - non-fatal overlay
+            logger.debug("system_memory skipped: %r", exc)
+        return mem
+
     @staticmethod
     def _centroid_rc(ref: Any) -> Optional[Tuple[int, int]]:
         """The integer (row, col) centroid of an ObjectRef footprint, or ``None``."""
@@ -1665,10 +1727,10 @@ class OurSearchAgent(Agent):
     def _ref_flags(self, ref: Any) -> List[str]:
         """Salient behavior flags grounded on the object (e.g. ``marked`` /
         ``movable`` / ``clickable``), from its Profile; empty if none. Excludes the
-        role axes (controllable / is_field) which are carried by ``role`` instead.
+        role axes (controllable / background) which are carried by ``role`` instead.
         Deterministic (sorted, deduped)."""
         behaviors = self._words_in_category("behavior")
-        skip = {self._CONTROLLABLE_ROLE, "is_field"}
+        skip = {self._CONTROLLABLE_ROLE, "background"}
         prof = getattr(ref, "profile", None)
         chars = list(getattr(prof, "characteristics", None) or [])
         return sorted(
@@ -2524,7 +2586,7 @@ class OurSearchAgent(Agent):
         """The AnalogizeRoles pre-pass injected into StateAbstraction (FR-R-1):
         classify the salient objects into functional roles by evaluating each
         roles.tsv ``recognized_by`` predicate over them (controllable via
-        has(controllable); field via has(static)/has(is_field); target via
+        has(controllable); field via has(static)/has(background); target via
         inside(self, box)). Any object no predicate claims falls through to
         ``default_role_of`` (the situation default), so bucketing is identical to
         a default StateAbstraction for un-classified objects (no regression).
@@ -2737,6 +2799,36 @@ class OurSearchAgent(Agent):
             color = int(grid[row, col])
             counts[color] = counts.get(color, 0) + 1
         return counts
+
+    @staticmethod
+    @staticmethod
+    def _flatten_objects(objects: List[Any]) -> List[Any]:
+        """Flatten the perceive laminar tree into a flat recognition list: every
+        TOP-LEVEL object PLUS all enclosure descendants (``GameObject.parts``,
+        recursively), parent-before-child, deduped by id.
+
+        perceive nests an enclosure's interior under ``parts`` and returns only the
+        top-level nodes, so a buried object (the ls20 '+' avatar on a panel; a goal
+        frame's interior target) would never reach role classification, the
+        controllable tracker, or the observation. Surfacing every node fixes that
+        without touching perceive (each node keeps its own ``parts``).
+
+        Deterministic (DP-10): input order, depth-first; no RNG / builtin hash."""
+        out: List[Any] = []
+        seen: set = set()
+
+        def _visit(obj: Any) -> None:
+            oid = getattr(obj, "id", None)
+            if oid in seen:
+                return
+            seen.add(oid)
+            out.append(obj)
+            for part in (getattr(obj, "parts", None) or []):
+                _visit(part)
+
+        for obj in objects:
+            _visit(obj)
+        return out
 
     @staticmethod
     def _is_field(obj, parse) -> bool:

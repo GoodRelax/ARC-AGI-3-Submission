@@ -390,7 +390,7 @@ def _detect_afford(ctx: FeatureContext, params: Mapping[str, str]) -> Detection:
         # and not autonomous.
         #
         # MARKED SUPPRESSES STATIC: a `marked` object is a FOREGROUND goal-marker,
-        # not background. Because the `field` recognizer or(has(is_field),
+        # not background. Because the `field` recognizer or(has(background),
         # has(static)) runs in the non-relational wave (BEFORE the relational
         # `target`), a marked-but-motionless goal object would otherwise be claimed
         # as `field` and never reach `target`. Withholding `static` when ctx.marked

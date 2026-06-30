@@ -95,7 +95,7 @@
             "additionalProperties": false,
             "required": ["predicate", "goal_kind", "solver_kinds"],
             "properties": {
-              "predicate": { "type": "string", "maxLength": 120, "description": "A predicate built ONLY from vocabulary.operators and vocabulary.roles, e.g. matches(target, reference). No literals/coordinates/colors." },
+              "predicate": { "type": "string", "maxLength": 120, "description": "A predicate built ONLY from vocabulary.operators and vocabulary.roles, e.g. matches(target, template). No literals/coordinates/colors." },
               "goal_kind": { "type": "string", "description": "A goal_kind id from vocabulary.goal_kinds." },
               "solver_kinds": { "type": "array", "items": { "type": "string" }, "description": "Solver ids from vocabulary.solver_kinds that could execute it." }
             }
@@ -110,7 +110,7 @@
             "additionalProperties": false,
             "required": ["label", "recognized_by"],
             "properties": {
-              "label": { "type": "string", "maxLength": 24, "description": "A new role label, e.g. 'reference'." },
+              "label": { "type": "string", "maxLength": 24, "description": "A new role label, e.g. 'template'." },
               "recognized_by": { "type": "string", "maxLength": 120, "description": "A predicate over vocabulary.operators recognizing it, e.g. and(has(marked), not(has(controllable)))." }
             }
           }

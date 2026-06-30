@@ -215,6 +215,12 @@ def narrow_schema(base: Dict[str, Any], obs: Dict[str, Any]) -> Dict[str, Any]:
                 },
             },
             "move": move,
+            # OPTIONAL free-form working-memory note (not required). Added to the
+            # ENFORCED grammar so the constrained decoder PERMITS it -- with
+            # additionalProperties False + required = [goal_prediction, move], an
+            # undeclared `note` was grammatically impossible, so the proposer could
+            # never write one. Validated/stored post-parse (advisory; never the move).
+            "note": {"type": "string"},
         },
     }
 
