@@ -1500,6 +1500,16 @@ class OurSearchAgent(Agent):
         # noise drowning the objects/effects. Re-add behind a budget gate if the
         # proposer ever starts composing useful lexicon proposals.
 
+        # board_palette (CLICK games only): the few `objects` targets are often NOT the
+        # cells that win a paint/match game -- the LLM needs the board's COLOUR
+        # structure to infer a rule (e.g. "click cells of the colour that matches a
+        # reference"). Surface a compact non-background colour palette so the proposer
+        # can reason which cells to click. Bounded (rarest 6 colours, 3 samples each).
+        if click_ok:
+            palette = self._board_palette(game_io.frame_to_grid(latest_frame))
+            if palette:
+                observation["board_palette"] = palette
+
         # recent_actions (anti-no-op / anti-loop): the last few played moves +
         # whether the board changed. Omitted when empty (optional schema field).
         recent = self._recent_actions_for_obs()
@@ -1575,6 +1585,35 @@ class OurSearchAgent(Agent):
                 if len(out) >= self._LLM_OBSERVATION_MAX_OBJECTS:
                     return out
         return out
+
+    def _board_palette(self, grid: Any) -> List[Dict[str, Any]]:
+        """A compact NON-background colour palette for CLICK reasoning: the distinct
+        colour codes present (excluding the dominant background), RAREST first (rare
+        colours are the likeliest goal markers), each with its cell count and up to 3
+        sample ``(row, col)`` positions. Capped to 6 colours so the prompt stays
+        bounded (~300 chars). The colour values are raw board codes (0-15), not the
+        word names used in ``objects``; the prompt flags this. Lets the proposer infer
+        a colour/region rule on paint/match games where the few ``objects`` targets are
+        not the cells that win. Deterministic (sorted; no rng/hash)."""
+        try:
+            arr = np.asarray(grid, dtype=np.int64)
+            vals, counts = np.unique(arr, return_counts=True)
+            if len(vals) <= 1:
+                return []
+            bg = int(vals[int(np.argmax(counts))])  # most common code = background
+            items = sorted(
+                ((int(v), int(c)) for v, c in zip(vals, counts) if int(v) != bg),
+                key=lambda vc: (vc[1], vc[0]),  # rarest first, then code
+            )
+            out: List[Dict[str, Any]] = []
+            for color, count in items[:6]:
+                ys, xs = np.where(arr == color)
+                pos = [[int(ys[k]), int(xs[k])] for k in range(min(3, len(ys)))]
+                out.append({"color": color, "cells": count, "positions": pos})
+            return out
+        except Exception as exc:  # noqa: BLE001 - non-fatal overlay
+            logger.debug("board palette skipped: %r", exc)
+            return []
 
     @staticmethod
     def _centroid_rc(ref: Any) -> Optional[Tuple[int, int]]:

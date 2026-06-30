@@ -39,10 +39,14 @@ Rules:
   learn it; do not commit to a guessed goal. Never repeat a control that just did nothing
   (`recent_actions[].changed == false`).
 - CLICK GAMES: if NO object has role `controllable` AND `inputs.click` is true, the
-  direction buttons move nothing - do NOT press them to "explore". CLICK instead: pick the
-  single target you most expect advances the goal and set move to its position. Reason about
-  WHICH target (e.g. the one whose colour/shape matches a reference or the goal); each turn,
-  prefer a target you have NOT just clicked with no effect (`recent_actions[].changed`).
+  direction buttons move nothing - do NOT press them to "explore". CLICK instead. The few
+  `objects` targets are often NOT the cells that win; use `board_palette` - the board's
+  NON-background colours (raw codes 0-15, rarest first) with cell counts and sample
+  `positions` - to INFER the rule (e.g. the goal wants every cell of a particular colour
+  clicked, or cells matching a reference colour). Set move to a `{"click":{row,col}}` at a
+  cell that fits your inferred rule (a palette `positions` entry, or a target's position).
+  Each turn pick a DIFFERENT fitting cell (advance through the rule); prefer cells you have
+  NOT just clicked with no effect (`recent_actions[].changed`).
 - All spatial facts are (row, col) numbers/offsets. The ONLY direction words are button
   NAMES, which are hints and can be wrong - never choose by the name.
 - Each button has an `effect`, one of: a GEOMETRIC direction (e.g. `row -1`, `col +1`: the
